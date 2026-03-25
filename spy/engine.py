@@ -76,26 +76,15 @@ class SPYEngine:
         asyncio.create_task(self._run_bar_poller())
 
     async def _load_initial_data(self):
-        now = int(time.time())
-
         self._log("Loading historical bars...")
 
-        # Batch 1
-        c_daily, c15m = await asyncio.gather(
-            self.finnhub.fetch_bars(self.SYMBOL, "D",  now - 86400*90,  now),
-            self.finnhub.fetch_bars(self.SYMBOL, "15", now - 86400*5,   now),
+        c_daily, c15m, c5m, c1m = await asyncio.gather(
+            self.finnhub.fetch_bars(self.SYMBOL, "D"),
+            self.finnhub.fetch_bars(self.SYMBOL, "15"),
+            self.finnhub.fetch_bars(self.SYMBOL, "5"),
+            self.finnhub.fetch_bars(self.SYMBOL, "1"),
         )
-        await asyncio.sleep(1)
-
-        # Batch 2
-        c5m, c1m = await asyncio.gather(
-            self.finnhub.fetch_bars(self.SYMBOL, "5",  now - 86400*3,   now),
-            self.finnhub.fetch_bars(self.SYMBOL, "1",  now - 3600*6,    now),
-        )
-        await asyncio.sleep(1)
-
-        # Batch 3
-        pm5m = await self.finnhub.fetch_bars(self.SYMBOL, "5", now - 3600*10, now)
+        pm5m = c5m
 
         self.candles.load(c1m, c5m, c15m, c_daily)
         self._log(f"Bars: {len(c1m)}x1m  {len(c5m)}x5m  {len(c15m)}x15m  {len(c_daily)}xdaily", "success")
@@ -144,12 +133,11 @@ class SPYEngine:
     async def _run_bar_poller(self):
         while True:
             await asyncio.sleep(60)
-            now = int(time.time())
             try:
                 c1m, c5m, c15m = await asyncio.gather(
-                    self.finnhub.fetch_bars(self.SYMBOL, "1",  now - 3600*4,  now),
-                    self.finnhub.fetch_bars(self.SYMBOL, "5",  now - 86400*2, now),
-                    self.finnhub.fetch_bars(self.SYMBOL, "15", now - 86400*3, now),
+                    self.finnhub.fetch_bars(self.SYMBOL, "1"),
+                    self.finnhub.fetch_bars(self.SYMBOL, "5"),
+                    self.finnhub.fetch_bars(self.SYMBOL, "15"),
                 )
                 if c1m: self.candles.c1m  = c1m
                 if c5m: self.candles.c5m  = c5m

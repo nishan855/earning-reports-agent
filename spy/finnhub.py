@@ -1,61 +1,60 @@
 import asyncio
-import aiohttp
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor
+import yfinance as yf
+import aiohttp
 from .models import Candle
+
+
+_yf_pool = ThreadPoolExecutor(max_workers=2)
+
+
+def _yf_fetch_bars(symbol: str, period: str, interval: str) -> list[Candle]:
+    try:
+        df = yf.download(symbol, period=period, interval=interval, progress=False)
+        if df.empty:
+            return []
+        if hasattr(df.columns, 'droplevel'):
+            df.columns = df.columns.droplevel(1)
+        candles = []
+        for idx, row in df.iterrows():
+            ts = int(idx.timestamp() * 1000)
+            candles.append(Candle(
+                t=ts, o=float(row["Open"]), h=float(row["High"]),
+                l=float(row["Low"]), c=float(row["Close"]),
+                v=float(row.get("Volume", 0)),
+            ))
+        return candles
+    except Exception as e:
+        print(f"yfinance error ({interval}): {e}")
+        return []
 
 
 class FinnhubClient:
     BASE = "https://finnhub.io/api/v1"
     WS   = "wss://ws.finnhub.io"
-    MAX_CALLS_PER_MIN = 55
 
     def __init__(self, api_key: str):
-        self._key         = api_key
-        self._call_times: list[float] = []
-        self._ws_task     = None
+        self._key = api_key
 
-    async def _rate_limited_get(self, url: str) -> dict:
-        now = time.time()
-        self._call_times = [t for t in self._call_times if now - t < 60]
-        if len(self._call_times) >= self.MAX_CALLS_PER_MIN:
-            wait = 60 - (now - self._call_times[0]) + 0.1
-            await asyncio.sleep(wait)
-        self._call_times.append(time.time())
-
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as resp:
-                if resp.status == 429:
-                    await asyncio.sleep(10)
-                    async with session.get(url) as retry:
-                        return await retry.json()
-                return await resp.json()
-
-    async def fetch_bars(
-        self,
-        symbol: str,
-        resolution: str | int,
-        from_ts: int,
-        to_ts:   int,
-    ) -> list[Candle]:
-        url = f"{self.BASE}/stock/candle?symbol={symbol}&resolution={resolution}&from={from_ts}&to={to_ts}&token={self._key}"
-        try:
-            data = await self._rate_limited_get(url)
-            if data.get("s") != "ok" or not data.get("t"):
-                return []
-            return [
-                Candle(t=data["t"][i] * 1000, o=data["o"][i], h=data["h"][i],
-                       l=data["l"][i], c=data["c"][i], v=data["v"][i])
-                for i in range(len(data["t"]))
-            ]
-        except Exception as e:
-            print(f"fetchBars error ({resolution}): {e}")
-            return []
+    async def fetch_bars(self, symbol: str, resolution: str) -> list[Candle]:
+        period_map = {
+            "1":  ("5d",  "1m"),
+            "5":  ("10d", "5m"),
+            "15": ("30d", "15m"),
+            "D":  ("6mo", "1d"),
+        }
+        period, interval = period_map.get(str(resolution), ("5d", "1m"))
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(_yf_pool, _yf_fetch_bars, symbol, period, interval)
 
     async def fetch_vix(self) -> float | None:
         try:
-            data = await self._rate_limited_get(f"{self.BASE}/quote?symbol=VIX&token={self._key}")
-            return data.get("c")
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"{self.BASE}/quote?symbol=VIX&token={self._key}") as resp:
+                    data = await resp.json()
+                    return data.get("c")
         except:
             return None
 
