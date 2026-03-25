@@ -13,6 +13,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from agent.graph import agent
+from spy.router import router as spy_router
+from spy.engine import get_engine
 
 CACHE_TTL = 86400
 _cache: dict[str, dict] = {}
@@ -49,6 +51,7 @@ async def _cache_cleanup_loop():
 async def lifespan(_app: FastAPI):
     logger.info("Qern API ready")
     task = asyncio.create_task(_cache_cleanup_loop())
+    await get_engine().start()
     yield
     task.cancel()
 
@@ -69,6 +72,7 @@ app.add_middleware(
 )
 
 app.mount("/frontend", StaticFiles(directory="frontend"), name="frontend")
+app.include_router(spy_router)
 
 
 @app.get("/")

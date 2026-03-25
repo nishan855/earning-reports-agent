@@ -38,6 +38,10 @@ repeating-linear-gradient(0deg,transparent,transparent 50px,rgba(0,229,160,.008)
 .header{height:48px;background:#080b0a;border-bottom:1px solid #1a2e24;display:flex;align-items:stretch;padding:0 28px}
 .header-seg{display:flex;align-items:center}
 .header-seg-left{padding-right:20px;border-right:1px solid #1a2e24}
+.nav-tabs{display:flex;gap:2px;align-items:stretch;padding:0 20px;border-right:1px solid #1a2e24}
+.nav-tab{display:flex;align-items:center;padding:0 14px;font-size:.7rem;font-family:var(--font-mono);color:var(--text-dim);text-decoration:none;letter-spacing:.5px;text-transform:uppercase;border-bottom:2px solid transparent;transition:color .2s,border-color .2s}
+.nav-tab:hover{color:var(--text)}
+.nav-tab.active{color:var(--accent);border-bottom-color:var(--accent)}
 .header-seg-center{padding:0 20px;border-right:1px solid #1a2e24}
 .header-seg-right{padding-left:20px;margin-left:auto}
 .logo{font-family:var(--font-head);font-weight:800;font-size:22px;letter-spacing:-1px;line-height:1}
@@ -458,7 +462,11 @@ cursor:pointer;transition:all .2s;
   <!-- Header -->
   <header class="header">
     <div class="header-seg header-seg-left">
-      <div class="logo"><span class="q">Q</span><span class="ern">ern</span></div>
+      <a href="/" class="logo" style="text-decoration:none"><span class="q">Q</span><span class="ern">ern</span></a>
+    </div>
+    <div class="nav-tabs">
+      <a href="/" class="nav-tab active">Earnings</a>
+      <a href="/spy-trader" class="nav-tab">SPY Trader</a>
     </div>
     <div class="header-seg header-seg-center">
       <span class="header-label">EARNINGS INTELLIGENCE TERMINAL V2.0</span>

@@ -1,0 +1,835 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Qern — SPY Trader</title>
+<link rel="icon" type="image/svg+xml" href="/frontend/favicon.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Syne:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+--bg:#080b0a;--card:#0d1510;--border:#1a2e24;--border-hover:#254035;
+--accent:#00e5a0;--accent-dim:rgba(0,229,160,.12);--accent-glow:rgba(0,229,160,.25);
+--yellow:#EF9F27;--red:#e24b4a;--green:#00e5a0;--blue:#3b82f6;--purple:#a78bfa;
+--text:#f0f0f0;--text-dim:#4a7060;--text-muted:#2d4a3a;
+--font-mono:'IBM Plex Mono',monospace;--font-head:'Syne',sans-serif;
+--bull:#00d97e;--bear:#ff4d6d;
+}
+html{scroll-behavior:smooth}
+body{
+background:var(--bg);color:var(--text);font-family:var(--font-mono);
+line-height:1.6;min-height:100vh;overflow-x:hidden;
+}
+body::before{
+content:'';position:fixed;inset:0;z-index:0;pointer-events:none;
+background:
+repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,229,160,.006) 2px,rgba(0,229,160,.006) 4px),
+repeating-linear-gradient(90deg,transparent,transparent 50px,rgba(0,229,160,.008) 50px,rgba(0,229,160,.008) 51px),
+repeating-linear-gradient(0deg,transparent,transparent 50px,rgba(0,229,160,.008) 50px,rgba(0,229,160,.008) 51px);
+}
+
+/* Header */
+.header{height:48px;background:#080b0a;border-bottom:1px solid #1a2e24;display:flex;align-items:stretch;padding:0 28px}
+.header-seg{display:flex;align-items:center}
+.header-seg-left{padding-right:20px;border-right:1px solid #1a2e24}
+.header-seg-center{padding:0 20px;border-right:1px solid #1a2e24}
+.header-seg-right{padding-left:20px;margin-left:auto}
+.logo{font-family:var(--font-head);font-weight:800;font-size:22px;letter-spacing:-1px;line-height:1;text-decoration:none}
+.logo .q{color:#00e5a0}
+.logo .ern{color:#fff}
+.header-label{font-family:var(--font-mono);font-size:9px;letter-spacing:0.1em;color:#2a4035;text-transform:uppercase}
+.header-right{display:flex;gap:16px;align-items:center;font-size:.7rem;color:var(--text-dim)}
+.status-dot{width:6px;height:6px;border-radius:50%;background:var(--accent);display:inline-block;margin-right:4px;animation:pulse-dot 2s infinite}
+@keyframes pulse-dot{0%,100%{opacity:1}50%{opacity:.3}}
+
+/* Nav tabs */
+.nav-tabs{display:flex;gap:2px;align-items:stretch;padding:0 20px;border-right:1px solid #1a2e24}
+.nav-tab{
+display:flex;align-items:center;padding:0 14px;font-size:.7rem;font-family:var(--font-mono);
+color:var(--text-dim);text-decoration:none;letter-spacing:.5px;text-transform:uppercase;
+border-bottom:2px solid transparent;transition:color .2s,border-color .2s;
+}
+.nav-tab:hover{color:var(--text)}
+.nav-tab.active{color:var(--accent);border-bottom-color:var(--accent)}
+
+/* Main layout */
+.container{max-width:1400px;margin:0 auto;padding:16px 24px;position:relative;z-index:1}
+
+/* Setup screen */
+.setup-screen{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:70vh;gap:24px}
+.setup-title{font-family:var(--font-head);font-size:1.6rem;font-weight:700;color:#fff}
+.setup-sub{font-size:.75rem;color:var(--text-dim);max-width:450px;text-align:center}
+.setup-form{display:flex;flex-direction:column;gap:12px;width:100%;max-width:400px}
+.setup-input{
+background:var(--card);border:1px solid var(--border);border-radius:6px;
+padding:12px 16px;font-family:var(--font-mono);font-size:.8rem;color:var(--text);outline:none;
+transition:border-color .2s;
+}
+.setup-input:focus{border-color:var(--accent)}
+.setup-input::placeholder{color:var(--text-muted)}
+.connect-btn{
+background:var(--accent);color:var(--bg);border:none;border-radius:6px;
+padding:12px;font-family:var(--font-mono);font-size:.85rem;font-weight:700;
+cursor:pointer;letter-spacing:1px;transition:background .2s;
+}
+.connect-btn:hover{background:#00ffb3}
+.connect-btn:disabled{opacity:.4;cursor:not-allowed}
+
+/* Top bar */
+.top-bar{
+display:flex;align-items:center;gap:16px;padding:10px 16px;
+background:var(--card);border:1px solid var(--border);border-radius:8px;
+margin-bottom:12px;flex-wrap:wrap;
+}
+.top-bar-item{display:flex;align-items:center;gap:6px;font-size:.72rem}
+.top-bar-label{color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;font-size:.6rem}
+.top-bar-value{color:var(--text);font-weight:600}
+.top-bar-badge{
+padding:2px 8px;border-radius:4px;font-size:.65rem;font-weight:700;letter-spacing:.5px;
+}
+.top-bar-sep{width:1px;height:20px;background:var(--border)}
+.price-live{font-size:1rem;font-weight:700;color:var(--accent);font-variant-numeric:tabular-nums}
+.price-change{font-size:.7rem;font-weight:600}
+
+/* Dashboard grid */
+.dashboard{display:grid;grid-template-columns:1fr 320px;gap:12px;display:none}
+.dashboard.active{display:grid}
+.main-col{display:flex;flex-direction:column;gap:12px}
+.side-col{display:flex;flex-direction:column;gap:12px}
+
+/* Chart */
+.chart-container{
+background:var(--card);border:1px solid var(--border);border-radius:8px;
+padding:12px;position:relative;
+}
+.chart-toolbar{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.tf-btn{
+background:transparent;border:1px solid var(--border);border-radius:4px;
+padding:3px 10px;font-size:.65rem;font-family:var(--font-mono);color:var(--text-dim);
+cursor:pointer;transition:all .2s;
+}
+.tf-btn.active{background:var(--accent-dim);border-color:var(--accent);color:var(--accent)}
+.chart-info{margin-left:auto;font-size:.6rem;color:var(--text-muted)}
+#chart-canvas{width:100%;height:280px;display:block;border-radius:4px}
+
+/* Layer scores */
+.layer-scores{
+display:flex;gap:12px;padding:12px 16px;
+background:var(--card);border:1px solid var(--border);border-radius:8px;
+align-items:center;
+}
+.layer-score{flex:1;text-align:center}
+.layer-score-label{font-size:.55rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px}
+.layer-score-val{font-size:1.1rem;font-weight:700}
+.score-bar{height:4px;background:var(--border);border-radius:2px;overflow:hidden;margin-top:4px}
+.score-bar-fill{height:100%;border-radius:2px;transition:width .5s}
+.total-score{font-size:1.6rem;font-weight:800;padding:0 16px;border-left:1px solid var(--border)}
+.total-label{font-size:.55rem;color:var(--text-muted);text-transform:uppercase}
+
+/* Factors */
+.factors-panel{
+background:var(--card);border:1px solid var(--border);border-radius:8px;padding:12px;
+}
+.factors-title{font-size:.7rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px}
+.factor-card{
+padding:8px 12px;border:1px solid var(--border);border-radius:6px;
+margin-bottom:6px;cursor:pointer;transition:border-color .2s;
+}
+.factor-card:hover{border-color:var(--border-hover)}
+.factor-card.expanded{border-color:var(--accent-dim)}
+.factor-top{display:flex;align-items:center;gap:8px}
+.factor-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.factor-label{font-size:.7rem;font-weight:600;flex:1}
+.factor-val{font-size:.65rem;color:var(--text-dim);text-align:right;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.factor-status{font-size:.6rem;font-weight:700;padding:1px 6px;border-radius:3px}
+.factor-detail{
+display:none;margin-top:8px;padding-top:8px;border-top:1px solid var(--border);
+font-size:.65rem;color:var(--text-dim);line-height:1.5;
+}
+.factor-card.expanded .factor-detail{display:block}
+.factor-missing{color:var(--yellow);font-style:italic;margin-top:4px}
+
+/* Signal panel */
+.signal-panel{
+background:var(--card);border:1px solid var(--border);border-radius:8px;padding:16px;
+min-height:300px;display:flex;flex-direction:column;
+}
+.signal-title{font-size:.7rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:12px}
+.signal-idle{
+flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;
+color:var(--text-muted);font-size:.75rem;text-align:center;gap:8px;
+}
+.signal-idle-icon{font-size:2rem;opacity:.3}
+.signal-stream{font-size:.7rem;color:var(--text-dim);line-height:1.6;white-space:pre-wrap;word-break:break-word}
+.signal-stream .cursor{display:inline-block;width:2px;height:12px;background:var(--accent);animation:blink 1s infinite}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:0}}
+.signal-card{display:none}
+.signal-card.active{display:block}
+.signal-badge{
+display:inline-block;padding:6px 20px;border-radius:6px;font-size:1.1rem;font-weight:800;
+letter-spacing:2px;margin-bottom:12px;
+}
+.signal-badge.long{background:rgba(0,217,126,.15);color:var(--bull);border:1px solid rgba(0,217,126,.3)}
+.signal-badge.short{background:rgba(255,77,109,.15);color:var(--bear);border:1px solid rgba(255,77,109,.3)}
+.signal-badge.skip{background:rgba(100,116,139,.15);color:#94a3b8;border:1px solid rgba(100,116,139,.3)}
+.signal-table{width:100%;margin-bottom:12px}
+.signal-table td{padding:4px 0;font-size:.7rem}
+.signal-table td:first-child{color:var(--text-muted);width:60px}
+.signal-table td:last-child{font-weight:600;font-variant-numeric:tabular-nums}
+.signal-narrative{font-style:italic;color:var(--text-dim);font-size:.7rem;margin-bottom:8px;padding:8px;background:rgba(0,229,160,.03);border-radius:4px}
+.signal-reasoning{font-size:.68rem;color:var(--text-dim);margin-bottom:8px;line-height:1.5}
+.signal-invalidation{font-size:.65rem;color:var(--red);padding:4px 8px;background:rgba(226,75,74,.08);border-radius:4px;margin-bottom:6px}
+.signal-size{font-size:.65rem;color:#94a3b8;margin-bottom:4px}
+.signal-risk{font-size:.65rem;color:var(--yellow)}
+.signal-reanalyze{
+margin-top:12px;background:transparent;border:1px solid var(--border);border-radius:4px;
+padding:6px 12px;font-size:.65rem;color:var(--text-dim);cursor:pointer;font-family:var(--font-mono);
+transition:border-color .2s,color .2s;
+}
+.signal-reanalyze:hover{border-color:var(--accent);color:var(--accent)}
+
+/* Levels panel */
+.levels-panel{
+background:var(--card);border:1px solid var(--border);border-radius:8px;padding:12px;
+}
+.levels-title{font-size:.7rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px}
+.level-row{display:flex;align-items:center;gap:8px;padding:4px 0;font-size:.65rem}
+.level-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0}
+.level-label{flex:1;color:var(--text-dim)}
+.level-price{font-weight:600;font-variant-numeric:tabular-nums}
+
+/* CVD Meter */
+.cvd-panel{
+background:var(--card);border:1px solid var(--border);border-radius:8px;padding:12px;
+}
+.cvd-title{font-size:.7rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px}
+.cvd-value{font-size:1.2rem;font-weight:700;font-variant-numeric:tabular-nums;margin-bottom:4px}
+.cvd-bar{height:6px;background:var(--border);border-radius:3px;overflow:hidden;position:relative}
+.cvd-bar-fill{position:absolute;top:0;height:100%;border-radius:3px;transition:all .3s}
+.cvd-bias{font-size:.6rem;margin-top:4px;font-weight:600;text-transform:uppercase}
+
+/* Activity log */
+.activity-log{
+background:var(--card);border:1px solid var(--border);border-radius:8px;padding:12px;
+max-height:180px;overflow-y:auto;
+}
+.activity-title{font-size:.7rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px}
+.log-entry{font-size:.6rem;color:var(--text-dim);padding:2px 0;border-bottom:1px solid rgba(26,46,36,.3)}
+.log-entry:last-child{border-bottom:none}
+.log-time{color:var(--text-muted);margin-right:6px}
+.log-ok{color:var(--green)}
+.log-warn{color:var(--yellow)}
+.log-err{color:var(--red)}
+
+/* Settings overlay */
+.settings-overlay{
+display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:100;
+align-items:center;justify-content:center;
+}
+.settings-overlay.active{display:flex}
+.settings-box{
+background:var(--card);border:1px solid var(--border);border-radius:10px;
+padding:24px;width:100%;max-width:380px;
+}
+.settings-title{font-family:var(--font-head);font-size:1rem;font-weight:700;color:#fff;margin-bottom:16px}
+.settings-row{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
+.settings-label{font-size:.7rem;color:var(--text-dim)}
+.settings-select{
+background:var(--bg);border:1px solid var(--border);border-radius:4px;
+padding:4px 8px;font-size:.7rem;color:var(--text);font-family:var(--font-mono);outline:none;
+}
+.settings-close{
+background:var(--accent);color:var(--bg);border:none;border-radius:6px;
+padding:8px 20px;font-size:.75rem;font-weight:700;cursor:pointer;font-family:var(--font-mono);
+margin-top:8px;
+}
+
+/* Responsive */
+@media(max-width:900px){
+.dashboard{grid-template-columns:1fr}
+.side-col{flex-direction:row;flex-wrap:wrap}
+.signal-panel,.levels-panel,.cvd-panel{flex:1;min-width:200px}
+}
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<header class="header">
+  <div class="header-seg header-seg-left">
+    <a href="/" class="logo"><span class="q">Q</span><span class="ern">ern</span></a>
+  </div>
+  <div class="nav-tabs">
+    <a href="/" class="nav-tab">Earnings</a>
+    <a href="/spy-trader" class="nav-tab active">SPY Trader</a>
+  </div>
+  <div class="header-seg header-seg-center">
+    <span class="header-label">SPY SIGNAL ENGINE v1.0</span>
+  </div>
+  <div class="header-seg header-seg-right">
+    <div class="header-right">
+      <span><span class="status-dot" id="ws-dot" style="background:var(--text-muted)"></span><span id="ws-status">DISCONNECTED</span></span>
+      <span id="session-badge" class="top-bar-badge" style="background:rgba(71,85,105,.2);color:#94a3b8">CLOSED</span>
+      <span id="header-clock"></span>
+      <span style="cursor:pointer" id="settings-btn" title="Settings">&#9881;</span>
+    </div>
+  </div>
+</header>
+
+<div class="container">
+  <!-- Top bar -->
+  <div class="top-bar" id="top-bar">
+    <div class="top-bar-item">
+      <span class="top-bar-label">SPY</span>
+      <span class="price-live" id="live-price">--</span>
+      <span class="price-change" id="price-change">--</span>
+    </div>
+    <div class="top-bar-sep"></div>
+    <div class="top-bar-item">
+      <span class="top-bar-label">Session</span>
+      <span id="top-session" class="top-bar-badge" style="background:rgba(71,85,105,.2);color:#94a3b8">--</span>
+    </div>
+    <div class="top-bar-sep"></div>
+    <div class="top-bar-item">
+      <span class="top-bar-label">VIX</span>
+      <span id="top-vix" class="top-bar-value">--</span>
+    </div>
+    <div class="top-bar-sep"></div>
+    <div class="top-bar-item">
+      <span class="top-bar-label">ATR</span>
+      <span id="top-atr" class="top-bar-value">--</span>
+    </div>
+    <div class="top-bar-sep"></div>
+    <div class="top-bar-item">
+      <span class="top-bar-label">Bias</span>
+      <span id="top-bias" class="top-bar-value">--</span>
+    </div>
+  </div>
+
+  <!-- Dashboard -->
+  <div class="dashboard active" id="dashboard">
+    <div class="main-col">
+      <!-- Chart -->
+      <div class="chart-container">
+        <div class="chart-toolbar">
+          <button class="tf-btn active" data-tf="1" onclick="setTimeframe(1,this)">1m</button>
+          <button class="tf-btn" data-tf="5" onclick="setTimeframe(5,this)">5m</button>
+          <button class="tf-btn" data-tf="15" onclick="setTimeframe(15,this)">15m</button>
+          <span class="chart-info" id="chart-info">0 bars</span>
+        </div>
+        <canvas id="chart-canvas"></canvas>
+      </div>
+
+      <!-- Layer Scores -->
+      <div class="layer-scores">
+        <div class="layer-score">
+          <div class="layer-score-label">Context</div>
+          <div class="layer-score-val" id="ctx-score">0/3</div>
+          <div class="score-bar"><div class="score-bar-fill" id="ctx-bar" style="width:0;background:var(--accent)"></div></div>
+        </div>
+        <div class="layer-score">
+          <div class="layer-score-label">Setup</div>
+          <div class="layer-score-val" id="stp-score">0/4</div>
+          <div class="score-bar"><div class="score-bar-fill" id="stp-bar" style="width:0;background:var(--blue)"></div></div>
+        </div>
+        <div class="layer-score">
+          <div class="layer-score-label">Timing</div>
+          <div class="layer-score-val" id="tmg-score">0/2</div>
+          <div class="score-bar"><div class="score-bar-fill" id="tmg-bar" style="width:0;background:var(--purple)"></div></div>
+        </div>
+        <div class="total-score">
+          <div class="total-label">Total</div>
+          <div id="total-score" style="color:var(--accent)">0/9</div>
+        </div>
+      </div>
+
+      <!-- Factors -->
+      <div class="factors-panel">
+        <div class="factors-title">9-Factor Analysis</div>
+        <div id="factors-list"></div>
+      </div>
+
+      <!-- Activity Log -->
+      <div class="activity-log">
+        <div class="activity-title">Activity Log</div>
+        <div id="log-entries"></div>
+      </div>
+    </div>
+
+    <div class="side-col">
+      <!-- Signal Panel -->
+      <div class="signal-panel">
+        <div class="signal-title">Signal</div>
+        <div class="signal-idle" id="signal-idle">
+          <div class="signal-idle-icon">&#9201;</div>
+          <div>Waiting for candle close...</div>
+          <div style="font-size:.6rem">Signals fire on 1m close when factors align</div>
+        </div>
+        <div class="signal-stream" id="signal-stream" style="display:none"></div>
+        <div class="signal-card" id="signal-card">
+          <div class="signal-badge" id="sig-badge">--</div>
+          <table class="signal-table">
+            <tr><td>Entry</td><td id="sig-entry">--</td></tr>
+            <tr><td>Stop</td><td id="sig-sl" style="color:var(--red)">--</td></tr>
+            <tr><td>TP1</td><td id="sig-tp1" style="color:var(--green)">--</td></tr>
+            <tr><td>TP2</td><td id="sig-tp2" style="color:var(--green)">--</td></tr>
+            <tr><td>R:R</td><td id="sig-rr">--</td></tr>
+          </table>
+          <div class="signal-narrative" id="sig-narrative"></div>
+          <div class="signal-reasoning" id="sig-reasoning"></div>
+          <div class="signal-invalidation" id="sig-invalidation"></div>
+          <div class="signal-size" id="sig-size"></div>
+          <div class="signal-risk" id="sig-risk"></div>
+          <button class="signal-reanalyze" onclick="forceReanalyze()">Re-analyze Now</button>
+        </div>
+      </div>
+
+      <!-- Levels -->
+      <div class="levels-panel">
+        <div class="levels-title">Key Levels</div>
+        <div id="levels-list"><div style="font-size:.65rem;color:var(--text-muted)">Connecting...</div></div>
+      </div>
+
+      <!-- CVD -->
+      <div class="cvd-panel">
+        <div class="cvd-title">Cumulative Volume Delta</div>
+        <div class="cvd-value" id="cvd-value">0</div>
+        <div class="cvd-bar"><div class="cvd-bar-fill" id="cvd-fill" style="left:50%;width:0;background:var(--accent)"></div></div>
+        <div class="cvd-bias" id="cvd-bias" style="color:var(--text-muted)">NEUTRAL</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Settings Overlay -->
+<div class="settings-overlay" id="settings-overlay">
+  <div class="settings-box">
+    <div class="settings-title">Settings</div>
+    <div class="settings-row">
+      <span class="settings-label">OR Duration</span>
+      <select class="settings-select" id="set-or-dur">
+        <option value="15">15 min</option>
+        <option value="30" selected>30 min</option>
+        <option value="60">60 min</option>
+      </select>
+    </div>
+    <div class="settings-row">
+      <span class="settings-label">Min R:R</span>
+      <select class="settings-select" id="set-min-rr">
+        <option value="1.5">1.5:1</option>
+        <option value="2" selected>2.0:1</option>
+        <option value="2.5">2.5:1</option>
+        <option value="3">3.0:1</option>
+      </select>
+    </div>
+    <div class="settings-row">
+      <span class="settings-label">Signal Cooldown</span>
+      <select class="settings-select" id="set-cooldown">
+        <option value="3">3 min</option>
+        <option value="5" selected>5 min</option>
+        <option value="10">10 min</option>
+      </select>
+    </div>
+    <button class="settings-close" onclick="closeSettings()">Close</button>
+  </div>
+</div>
+
+
+<script>
+// Pure display layer — all data from backend WebSocket
+let state = {};
+let c1m = [], c5m = [], c15m = [];
+let levels = [];
+let currentSignal = null;
+let selectedTF = 1;
+let streamText = '';
+
+// Clock
+function updateClock() {
+  const now = new Date();
+  const et = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
+  const h = String(et.getHours()).padStart(2, '0');
+  const m = String(et.getMinutes()).padStart(2, '0');
+  const s = String(et.getSeconds()).padStart(2, '0');
+  document.getElementById('header-clock').textContent = `${h}:${m}:${s} ET`;
+}
+setInterval(updateClock, 1000);
+updateClock();
+
+// Settings
+document.getElementById('settings-btn').addEventListener('click', () => {
+  document.getElementById('settings-overlay').classList.add('active');
+});
+function closeSettings() {
+  document.getElementById('settings-overlay').classList.remove('active');
+}
+
+// WebSocket
+const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+const ws = new WebSocket(`${proto}//${location.host}/ws/spy`);
+
+ws.onopen = () => {
+  document.getElementById('ws-dot').style.background = 'var(--accent)';
+  document.getElementById('ws-status').textContent = 'LIVE';
+};
+
+ws.onclose = () => {
+  document.getElementById('ws-dot').style.background = 'var(--text-muted)';
+  document.getElementById('ws-status').textContent = 'RECONNECTING...';
+  setTimeout(() => location.reload(), 3000);
+};
+
+ws.onerror = () => {
+  document.getElementById('ws-status').textContent = 'ERROR';
+};
+
+ws.onmessage = (event) => {
+  const msg = JSON.parse(event.data);
+  switch(msg.type) {
+    case 'tick':
+      updatePrice(msg.price, msg.cvd);
+      break;
+    case 'state':
+      renderFullState(msg.data);
+      break;
+    case 'signal_token':
+      appendSignalToken(msg.token);
+      break;
+    case 'signal_complete':
+      renderSignalCard(msg.signal);
+      break;
+    case 'signal_error':
+      showSignalError(msg.error);
+      break;
+  }
+};
+
+// Keepalive
+setInterval(() => { if (ws.readyState === 1) ws.send(JSON.stringify({type:'ping'})); }, 30000);
+
+// Re-analyze
+function forceReanalyze() {
+  if (ws.readyState === 1) ws.send(JSON.stringify({type:'reanalyze'}));
+}
+
+// Tick updates
+function updatePrice(price, cvd) {
+  document.getElementById('live-price').textContent = `$${price.toFixed(2)}`;
+  // Update CVD
+  const cvdEl = document.getElementById('cvd-value');
+  cvdEl.textContent = (cvd >= 0 ? '+' : '') + Math.round(cvd).toLocaleString();
+  cvdEl.style.color = cvd > 500 ? 'var(--bull)' : cvd < -500 ? 'var(--bear)' : 'var(--text)';
+  const biasEl = document.getElementById('cvd-bias');
+  biasEl.textContent = cvd > 500 ? 'BUYERS' : cvd < -500 ? 'SELLERS' : 'NEUTRAL';
+  biasEl.style.color = cvd > 500 ? 'var(--bull)' : cvd < -500 ? 'var(--bear)' : 'var(--text-muted)';
+  const fill = document.getElementById('cvd-fill');
+  const maxCvd = 5000;
+  const pct = Math.min(Math.abs(cvd) / maxCvd * 50, 50);
+  if (cvd >= 0) { fill.style.left = '50%'; fill.style.width = pct + '%'; fill.style.background = 'var(--bull)'; }
+  else { fill.style.left = (50 - pct) + '%'; fill.style.width = pct + '%'; fill.style.background = 'var(--bear)'; }
+  // Update live candle on chart
+  if (c1m.length) { c1m[c1m.length - 1].c = price; c1m[c1m.length - 1].h = Math.max(c1m[c1m.length - 1].h, price); c1m[c1m.length - 1].l = Math.min(c1m[c1m.length - 1].l, price); }
+}
+
+// Full state render
+function renderFullState(d) {
+  state = d;
+  c1m = d.c1m || [];
+  c5m = d.c5m || [];
+  c15m = d.c15m || [];
+  levels = d.levels || [];
+
+  // Session
+  if (d.session) {
+    ['session-badge','top-session'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) { el.textContent = d.session.label; el.style.background = d.session.color + '22'; el.style.color = d.session.color; }
+    });
+  }
+
+  // Price
+  if (d.livePrice) document.getElementById('live-price').textContent = `$${d.livePrice.toFixed(2)}`;
+
+  // Factor engine
+  if (d.factorEngine) {
+    const e = d.factorEngine;
+    document.getElementById('ctx-score').textContent = `${e.contextScore}/3`;
+    document.getElementById('stp-score').textContent = `${e.setupScore}/4`;
+    document.getElementById('tmg-score').textContent = `${e.timingScore}/2`;
+    document.getElementById('total-score').textContent = `${e.totalScore}/9`;
+    document.getElementById('ctx-bar').style.width = `${(e.contextScore / 3) * 100}%`;
+    document.getElementById('stp-bar').style.width = `${(e.setupScore / 4) * 100}%`;
+    document.getElementById('tmg-bar').style.width = `${(e.timingScore / 2) * 100}%`;
+    document.getElementById('total-score').style.color = e.allOk ? 'var(--accent)' : e.totalScore >= 5 ? 'var(--yellow)' : 'var(--text-dim)';
+    document.getElementById('top-atr').textContent = `$${e.atr.toFixed(3)}`;
+    const biasEl = document.getElementById('top-bias');
+    biasEl.textContent = e.bias;
+    biasEl.style.color = e.bias === 'BULLISH' ? 'var(--bull)' : e.bias === 'BEARISH' ? 'var(--bear)' : 'var(--yellow)';
+
+    // Factors
+    const fl = document.getElementById('factors-list');
+    fl.innerHTML = e.factors.map(f => `
+      <div class="factor-card" onclick="this.classList.toggle('expanded')">
+        <div class="factor-top">
+          <div class="factor-dot" style="background:${f.ok ? f.color : '#475569'}"></div>
+          <div class="factor-label">${f.label}${f.isBonus ? ' (bonus)' : ''}</div>
+          <div class="factor-val">${f.val}</div>
+          <div class="factor-status" style="background:${f.ok ? 'rgba(0,217,126,.15)' : 'rgba(100,116,139,.15)'};color:${f.ok ? '#00d97e' : '#94a3b8'}">${f.ok ? 'OK' : 'FAIL'}</div>
+        </div>
+        <div class="factor-detail">
+          ${f.reason}
+          ${f.missing ? `<div class="factor-missing">${f.missing}</div>` : ''}
+        </div>
+      </div>
+    `).join('');
+  }
+
+  // Signal
+  if (d.signal) renderSignalCard(d.signal);
+  if (d.streaming && d.streamText) {
+    document.getElementById('signal-idle').style.display = 'none';
+    document.getElementById('signal-card').classList.remove('active');
+    const streamEl = document.getElementById('signal-stream');
+    streamEl.style.display = 'block';
+    streamEl.innerHTML = d.streamText + '<span class="cursor"></span>';
+    streamText = d.streamText;
+  }
+
+  // Levels
+  renderLevels();
+
+  // Log
+  if (d.log) {
+    const el = document.getElementById('log-entries');
+    el.innerHTML = d.log.map(l => {
+      const cls = l.level === 'success' ? 'log-ok' : l.level === 'error' ? 'log-err' : l.level === 'warn' ? 'log-warn' : '';
+      return `<div class="log-entry"><span class="log-time">${l.time}</span><span class="${cls}">${l.msg}</span></div>`;
+    }).reverse().join('');
+  }
+
+  renderChart();
+}
+
+// Signal streaming
+function appendSignalToken(token) {
+  streamText += token;
+  document.getElementById('signal-idle').style.display = 'none';
+  document.getElementById('signal-card').classList.remove('active');
+  const streamEl = document.getElementById('signal-stream');
+  streamEl.style.display = 'block';
+  streamEl.innerHTML = streamText + '<span class="cursor"></span>';
+}
+
+function renderSignalCard(sig) {
+  streamText = '';
+  currentSignal = sig;
+  document.getElementById('signal-idle').style.display = 'none';
+  document.getElementById('signal-stream').style.display = 'none';
+  const card = document.getElementById('signal-card');
+  card.classList.add('active');
+  const badge = document.getElementById('sig-badge');
+  badge.textContent = sig.direction;
+  badge.className = 'signal-badge ' + sig.direction.toLowerCase();
+  document.getElementById('sig-entry').textContent = sig.entry ? `$${sig.entry.toFixed(2)}` : '--';
+  document.getElementById('sig-sl').textContent = sig.stopLoss ? `$${sig.stopLoss.toFixed(2)}` : '--';
+  document.getElementById('sig-tp1').textContent = sig.tp1 ? `$${sig.tp1.toFixed(2)}` : '--';
+  document.getElementById('sig-tp2').textContent = sig.tp2 ? `$${sig.tp2.toFixed(2)}` : '--';
+  document.getElementById('sig-rr').textContent = sig.rr ? `${sig.rr}:1` : '--';
+  document.getElementById('sig-narrative').textContent = sig.narrative || '';
+  document.getElementById('sig-reasoning').textContent = sig.reasoning || '';
+  document.getElementById('sig-invalidation').textContent = sig.invalidation ? `Invalidation: ${sig.invalidation}` : '';
+  document.getElementById('sig-size').textContent = sig.sizeNote || '';
+  document.getElementById('sig-risk').textContent = sig.keyRisk ? `Risk: ${sig.keyRisk}` : '';
+  renderChart();
+}
+
+function showSignalError(err) {
+  streamText = '';
+  document.getElementById('signal-stream').style.display = 'block';
+  document.getElementById('signal-stream').innerHTML = `<span style="color:var(--red)">Error: ${err}</span>`;
+}
+
+// Levels
+function renderLevels() {
+  const el = document.getElementById('levels-list');
+  if (!levels.length) { el.innerHTML = '<div style="font-size:.65rem;color:var(--text-muted)">No levels yet</div>'; return; }
+  const lastPrice = c1m.length ? c1m[c1m.length - 1].c : 0;
+  const nearby = levels.filter(l => lastPrice && Math.abs(l.price - lastPrice) / lastPrice < 0.02)
+    .sort((a, b) => b.strength - a.strength).slice(0, 12);
+  el.innerHTML = nearby.map(l => {
+    const clr = l.type === 'support' ? 'var(--bull)' : l.type === 'resistance' ? 'var(--bear)' : l.source === 'OR' ? 'var(--purple)' : l.source === 'VWAP' ? 'var(--yellow)' : 'var(--text-dim)';
+    return `<div class="level-row"><div class="level-dot" style="background:${clr}"></div><span class="level-label">${l.label}</span><span class="level-price" style="color:${clr}">$${l.price.toFixed(2)}</span></div>`;
+  }).join('');
+}
+
+// Timeframe
+function setTimeframe(tf, btn) {
+  selectedTF = tf;
+  document.querySelectorAll('.tf-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  renderChart();
+}
+
+// Canvas Chart
+function renderChart() {
+  const canvas = document.getElementById('chart-canvas');
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = rect.width * dpr;
+  canvas.height = rect.height * dpr;
+  ctx.scale(dpr, dpr);
+  const W = rect.width, H = rect.height;
+
+  ctx.fillStyle = '#060908';
+  ctx.fillRect(0, 0, W, H);
+
+  const data = selectedTF === 1 ? c1m : selectedTF === 5 ? c5m : c15m;
+  if (!data.length) {
+    ctx.fillStyle = '#2d4a3a';
+    ctx.font = '12px IBM Plex Mono';
+    ctx.textAlign = 'center';
+    ctx.fillText('Waiting for data...', W / 2, H / 2);
+    return;
+  }
+
+  const visible = data.slice(-90);
+  const marginR = 65, marginB = 24, marginL = 4, marginT = 8;
+  const chartW = W - marginL - marginR;
+  const chartH = H - marginT - marginB;
+
+  const hi = Math.max(...visible.map(c => c.h));
+  const lo = Math.min(...visible.map(c => c.l));
+  const range = hi - lo || 1;
+  const pad = range * 0.05;
+  const priceHi = hi + pad, priceLo = lo - pad;
+  const priceRange = priceHi - priceLo;
+
+  const barW = chartW / visible.length;
+  const bodyW = Math.max(barW * 0.6, 2);
+
+  function x(i) { return marginL + i * barW + barW / 2; }
+  function y(p) { return marginT + (1 - (p - priceLo) / priceRange) * chartH; }
+
+  // Session background shading
+  const sessColors = { POWER: 'rgba(0,217,126,.04)', OR: 'rgba(167,139,250,.04)', DEAD: 'rgba(239,68,68,.03)', MID: 'rgba(59,130,246,.03)' };
+  visible.forEach((c, i) => {
+    const d = new Date(c.t);
+    const et = new Date(d.toLocaleString('en-US', { timeZone: 'America/New_York' }));
+    const m = et.getHours() * 60 + et.getMinutes();
+    let bg = null;
+    if (m >= 570 && m < 600) bg = sessColors.OR;
+    else if (m >= 600 && m < 660) bg = sessColors.POWER;
+    else if (m >= 660 && m < 720) bg = sessColors.MID;
+    else if (m >= 720 && m < 840) bg = sessColors.DEAD;
+    if (bg) { ctx.fillStyle = bg; ctx.fillRect(marginL + i * barW, marginT, barW, chartH); }
+  });
+
+  // Grid
+  ctx.strokeStyle = '#0f1a14';
+  ctx.lineWidth = 0.5;
+  for (let i = 0; i <= 6; i++) {
+    const py = marginT + (i / 6) * chartH;
+    ctx.beginPath(); ctx.moveTo(marginL, py); ctx.lineTo(W - marginR, py); ctx.stroke();
+    const pv = priceHi - (i / 6) * priceRange;
+    ctx.fillStyle = '#2d4a3a';
+    ctx.font = '9px IBM Plex Mono';
+    ctx.textAlign = 'left';
+    ctx.fillText(`$${pv.toFixed(2)}`, W - marginR + 4, py + 3);
+  }
+
+  // Key levels
+  levels.forEach(lvl => {
+    if (lvl.price < priceLo || lvl.price > priceHi) return;
+    if (lvl.strength < 3) return;
+    const ly = y(lvl.price);
+    ctx.setLineDash([4, 4]);
+    ctx.strokeStyle = lvl.source === 'OR' ? '#a78bfa44' : lvl.type === 'support' ? '#00d97e33' : lvl.type === 'resistance' ? '#ff4d6d33' : lvl.source === 'VWAP' ? '#EF9F2744' : '#47556922';
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(marginL, ly); ctx.lineTo(W - marginR, ly); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = lvl.source === 'OR' ? '#a78bfa88' : '#47556966';
+    ctx.font = '8px IBM Plex Mono';
+    ctx.textAlign = 'right';
+    ctx.fillText(lvl.label, W - marginR - 2, ly - 2);
+  });
+
+  // Candles
+  visible.forEach((c, i) => {
+    const bull = c.c >= c.o;
+    const color = bull ? '#00d97e' : '#ff4d6d';
+    const cx = x(i);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(cx, y(c.h)); ctx.lineTo(cx, y(c.l)); ctx.stroke();
+    const top = y(Math.max(c.o, c.c));
+    const bot = y(Math.min(c.o, c.c));
+    const bh = Math.max(bot - top, 1);
+    ctx.fillStyle = color;
+    ctx.fillRect(cx - bodyW / 2, top, bodyW, bh);
+  });
+
+  // Current price line
+  if (visible.length) {
+    const cp = visible[visible.length - 1].c;
+    const cy = y(cp);
+    ctx.setLineDash([2, 2]);
+    ctx.strokeStyle = '#00e5a066';
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(marginL, cy); ctx.lineTo(W - marginR, cy); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = '#00e5a0';
+    ctx.fillRect(W - marginR, cy - 8, marginR, 16);
+    ctx.fillStyle = '#080b0a';
+    ctx.font = 'bold 9px IBM Plex Mono';
+    ctx.textAlign = 'left';
+    ctx.fillText(`$${cp.toFixed(2)}`, W - marginR + 3, cy + 3);
+  }
+
+  // Signal markers
+  if (currentSignal && currentSignal.direction !== 'SKIP' && currentSignal.entry) {
+    const ey = y(currentSignal.entry);
+    if (ey >= marginT && ey <= marginT + chartH) {
+      const isLong = currentSignal.direction === 'LONG';
+      ctx.fillStyle = isLong ? '#00d97e' : '#ff4d6d';
+      ctx.beginPath();
+      const tx = W - marginR - 10;
+      if (isLong) { ctx.moveTo(tx, ey + 6); ctx.lineTo(tx - 5, ey - 4); ctx.lineTo(tx + 5, ey - 4); }
+      else { ctx.moveTo(tx, ey - 6); ctx.lineTo(tx - 5, ey + 4); ctx.lineTo(tx + 5, ey + 4); }
+      ctx.fill();
+    }
+    if (currentSignal.stopLoss) {
+      const sly = y(currentSignal.stopLoss);
+      ctx.setLineDash([3, 3]); ctx.strokeStyle = '#ff4d6d55'; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(marginL, sly); ctx.lineTo(W - marginR, sly); ctx.stroke(); ctx.setLineDash([]);
+    }
+    if (currentSignal.tp1) {
+      const t1y = y(currentSignal.tp1);
+      ctx.setLineDash([3, 3]); ctx.strokeStyle = '#00d97e55'; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(marginL, t1y); ctx.lineTo(W - marginR, t1y); ctx.stroke(); ctx.setLineDash([]);
+    }
+  }
+
+  // Time axis
+  ctx.fillStyle = '#2d4a3a';
+  ctx.font = '8px IBM Plex Mono';
+  ctx.textAlign = 'center';
+  const step = Math.max(Math.floor(visible.length / 8), 1);
+  for (let i = 0; i < visible.length; i += step) {
+    const d = new Date(visible[i].t);
+    const et = new Date(d.toLocaleString('en-US', { timeZone: 'America/New_York' }));
+    const label = `${String(et.getHours()).padStart(2, '0')}:${String(et.getMinutes()).padStart(2, '0')}`;
+    ctx.fillText(label, x(i), H - 6);
+  }
+
+  document.getElementById('chart-info').textContent = `${visible.length} bars (${selectedTF}m)`;
+}
+
+window.addEventListener('resize', renderChart);
+setInterval(() => { if (c1m.length) renderChart(); }, 2000);
+</script>
+</body>
+</html>
