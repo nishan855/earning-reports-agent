@@ -232,6 +232,13 @@ class ToolHandler:
                 f"{tstr}  {c.o:.2f}  {c.h:.2f}  {c.l:.2f}  {c.c:.2f}  {vol_r}  "
                 f"body={body:.3f} up_wick={upper:.3f} dn_wick={lower:.3f} wick/body={ratio:.1f} {color}"
             )
+        # Volume surge on last candle
+        if candles and avg_v > 0:
+            last = candles[-1]
+            if last.v >= avg_v * 2.0:
+                lines.append(f"\nVOLUME SURGE on last candle ({last.v / avg_v:.1f}x avg) — institutional activity")
+            elif last.v >= avg_v * 1.5:
+                lines.append(f"\nAbove-average volume on last candle ({last.v / avg_v:.1f}x)")
         return "\n".join(lines)
 
     async def _get_cvd(self, args: dict) -> str:
@@ -251,6 +258,13 @@ class ToolHandler:
         if len(history) >= 2:
             total_change = history[-1].value - history[0].value
             lines.append(f"\nTotal change last {len(history)} min: {total_change:+,.0f}")
+
+        # Divergence detection
+        div = self.engine.cvd.detect_divergence(self.engine.candles.closed_1m)
+        if div["type"] != "NONE":
+            lines.append(f"\nDIVERGENCE: {div['type']} — {div['detail']}")
+        else:
+            lines.append(f"\nNo divergence detected — CVD confirms price action")
         return "\n".join(lines)
 
     def _get_atr(self) -> float:
@@ -351,26 +365,35 @@ class ToolHandler:
         return "\n".join(lines)
 
     async def _get_trend(self, args: dict) -> str:
-        from ..market_utils import detect_trend, calc_vwap
+        from ..market_utils import detect_trend_with_strength, calc_vwap
 
         closed_15m = self.engine.candles.closed_15m
         closed_5m = self.engine.candles.closed_5m
         current = self.engine.candles.live_price
         today_1m = self.engine.candles.today_candles_1m
 
-        t15 = detect_trend(closed_15m).value if len(closed_15m) >= 30 else "UNKNOWN"
-        t5 = detect_trend(closed_5m).value if len(closed_5m) >= 30 else "UNKNOWN"
+        if len(closed_15m) >= 30:
+            t15_dir, t15_count, t15_str = detect_trend_with_strength(closed_15m)
+        else:
+            t15_dir, t15_count, t15_str = None, 0, "UNKNOWN"
+        if len(closed_5m) >= 30:
+            t5_dir, t5_count, t5_str = detect_trend_with_strength(closed_5m)
+        else:
+            t5_dir, t5_count, t5_str = None, 0, "UNKNOWN"
+
+        t15_val = t15_dir.value if t15_dir else "UNKNOWN"
+        t5_val = t5_dir.value if t5_dir else "UNKNOWN"
+        aligned = t15_val == t5_val and t15_val not in ("RANGING", "UNKNOWN")
         vwap = calc_vwap(today_1m) if today_1m else 0
         v_pos = "ABOVE" if current > vwap else "BELOW"
         v_dist = abs(current - vwap)
-        aligned = t15 == t5 and t15 not in ("RANGING", "UNKNOWN")
 
         return (
-            f"15m trend: {t15}\n"
-            f"5m trend:  {t5}\n"
-            f"Aligned:   {'YES — strong' if aligned else 'NO — conflicting'}\n"
+            f"15m trend: {t15_val} ({t15_str}, {t15_count} swings)\n"
+            f"5m trend:  {t5_val} ({t5_str}, {t5_count} swings)\n"
+            f"Aligned:   {'YES — trade with confidence' if aligned else 'NO — conflicting, be cautious'}\n"
             f"VWAP:      ${vwap:.2f} (price {v_pos} by ${v_dist:.2f})\n"
-            f"Bias:      {t15 if t15 not in ('RANGING', 'UNKNOWN') else t5}"
+            f"Bias:      {t15_val if t15_val not in ('RANGING', 'UNKNOWN') else t5_val}"
         )
 
     async def _get_day_character(self, args: dict) -> str:

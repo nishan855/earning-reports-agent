@@ -342,16 +342,16 @@ async def test_patterns():
     results["far_no_rejection"] = "PASS" if not engine._is_rejection_candle(far, lvl_r) else "FAIL"
 
     # Retest: unbroken level should not trigger
-    engine._broken_levels.discard("TEST_R")
+    engine._broken_levels.pop("TEST_R", None)
     rt = Candle(t=0, o=580.30, h=581.00, l=579.98, c=580.05, v=1000)
     results["unbroken_no_retest"] = "PASS" if not engine._is_retest_candle(rt, lvl_r) else "FAIL"
 
-    # Bearish retest: broken level, held below
-    engine._broken_levels.add("TEST_R")
+    # Bearish retest: confirmed broken level, held below
+    engine._broken_levels["TEST_R"] = {"time": 0, "closes_since": 3, "confirmed": True}
     brt = Candle(t=0, o=579.50, h=580.02, l=579.20, c=579.60, v=1000)
     results["bearish_retest"] = "PASS" if engine._is_retest_candle(brt, lvl_r) else "FAIL"
 
-    engine._broken_levels.discard("TEST_R")
+    engine._broken_levels.pop("TEST_R", None)
     passed = sum(1 for v in results.values() if v == "PASS")
     results["summary"] = f"{passed}/{len(results) - 1} passed"
     return results

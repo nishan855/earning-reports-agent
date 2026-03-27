@@ -13,7 +13,7 @@ from .levels import build_levels, compute_opening_range
 from .finnhub import FinnhubClient
 from .sessions import get_session, is_trading_allowed
 from .models import Signal, PreMarketData, Level
-from .market_utils import calc_avg_vol
+from .market_utils import calc_avg_vol, calc_atr
 
 _ET = pytz.timezone("America/New_York")
 
@@ -86,7 +86,10 @@ class SPYEngine:
         self.signal_history: list[dict] = []
 
         self._last_5m_count = 0
-        self._broken_levels: set[str] = set()
+        self._last_5m_ts: int = 0
+        self._broken_levels: dict[str, dict] = {}
+        self._atr_1m: float = 0.5
+        self._last_trade_ts: float = 0.0
         self.candles.on_candle_close(self._on_candle_close)
 
     async def start(self):
@@ -143,6 +146,7 @@ class SPYEngine:
 
     async def _run_finnhub_ws(self):
         async def on_trade(price: float, volume: float, ts: int):
+            self._last_trade_ts = time.time()
             self.cvd.process_trade(price, volume)
             self.candles.update_live(price, volume, ts)
             self.state.live_price = price
@@ -205,45 +209,59 @@ class SPYEngine:
         return (nearest is not None), nearest
 
     def _is_rejection_candle(self, candle, level: Level) -> bool:
+        atr = self._atr_1m
         body = abs(candle.c - candle.o)
         upper_wick = candle.h - max(candle.o, candle.c)
         lower_wick = min(candle.o, candle.c) - candle.l
 
-        if body < 0.02:
+        if body < atr * 0.03:
             return False
 
+        # Bearish rejection at resistance: wick pushed up to level, body closed below
         touched_above = (
             candle.h >= level.price
             and abs(candle.h - level.price) / level.price < 0.003
         )
-        if touched_above and upper_wick >= body * 2.0 and candle.c < level.price:
+        if (touched_above
+                and upper_wick >= body * 2.0
+                and upper_wick >= atr * 0.3
+                and candle.c < level.price):
             return True
 
+        # Bullish rejection at support: wick pushed down to level, body closed above
         touched_below = (
             candle.l <= level.price
             and abs(candle.l - level.price) / level.price < 0.003
         )
-        if touched_below and lower_wick >= body * 2.0 and candle.c > level.price:
+        if (touched_below
+                and lower_wick >= body * 2.0
+                and lower_wick >= atr * 0.3
+                and candle.c > level.price):
             return True
 
         return False
 
     def _is_stop_hunt_candle(self, candle, level: Level) -> bool:
+        atr = self._atr_1m
         body = abs(candle.c - candle.o)
         upper_wick = candle.h - max(candle.o, candle.c)
         lower_wick = min(candle.o, candle.c) - candle.l
-        if body < 0.02:
+        if body < atr * 0.03:
             return False
-        # Bullish stop hunt: wick swept below support, closed above
+        # Bullish stop hunt: swept below support then closed above
         if level.type in ("support", "pivot", "dynamic"):
+            sweep = level.price - candle.l
             if (candle.l < level.price
+                    and sweep >= atr * 0.15
                     and candle.c > level.price
                     and candle.c > candle.o
                     and lower_wick >= body * 2.5):
                 return True
-        # Bearish stop hunt: wick swept above resistance, closed below
+        # Bearish stop hunt: swept above resistance then closed below
         if level.type in ("resistance", "pivot", "dynamic"):
+            sweep = candle.h - level.price
             if (candle.h > level.price
+                    and sweep >= atr * 0.15
                     and candle.c < level.price
                     and candle.c < candle.o
                     and upper_wick >= body * 2.5):
@@ -251,35 +269,45 @@ class SPYEngine:
         return False
 
     def _is_retest_candle(self, candle, level: Level) -> bool:
-        if level.label not in self._broken_levels:
+        info = self._broken_levels.get(level.label)
+        if not info or not info.get("confirmed"):
             return False
+        atr = self._atr_1m
         body = abs(candle.c - candle.o)
-        if body < 0.02:
+        if body < atr * 0.03:
             return False
         dist_pct = abs(candle.c - level.price) / level.price if level.price > 0 else 1
-        if dist_pct > 0.002:
+        if dist_pct > 0.003:
             return False
         lower_wick = min(candle.o, candle.c) - candle.l
         upper_wick = candle.h - max(candle.o, candle.c)
-        # Bullish retest: price came back to broken resistance (now support), held above
-        if candle.c > level.price and candle.l <= level.price + 0.05 and lower_wick >= body:
+        proximity = atr * 0.1
+        # Bullish retest: broken resistance now support, price came back and held above
+        if candle.c > level.price and candle.l <= level.price + proximity and lower_wick >= body:
             return True
-        # Bearish retest: price came back to broken support (now resistance), held below
-        if candle.c < level.price and candle.h >= level.price - 0.05 and upper_wick >= body:
+        # Bearish retest: broken support now resistance, price came back and held below
+        if candle.c < level.price and candle.h >= level.price - proximity and upper_wick >= body:
             return True
         return False
 
-    def _check_and_record_breakout(self, candle_5m, level: Level) -> bool:
+    def _check_and_record_breakout(self, candle_5m, level: Level, avg_v: float) -> bool:
         prev_5m = self.candles.closed_5m[-2] if len(self.candles.closed_5m) >= 2 else None
         if not prev_5m:
             return False
-        # Bullish breakout: prev closed below, now closed above
+        atr = self._atr_1m
+        body = abs(candle_5m.c - candle_5m.o)
+        # Require meaningful body and above-average volume
+        if body < atr * 1.5:
+            return False
+        if avg_v > 0 and candle_5m.v < avg_v * 1.2:
+            return False
+        # Bullish breakout
         if prev_5m.c < level.price and candle_5m.c > level.price and candle_5m.c > candle_5m.o:
-            self._broken_levels.add(level.label)
+            self._broken_levels[level.label] = {"time": time.time(), "closes_since": 0, "confirmed": False}
             return True
-        # Bearish breakout: prev closed above, now closed below
+        # Bearish breakout
         if prev_5m.c > level.price and candle_5m.c < level.price and candle_5m.c < candle_5m.o:
-            self._broken_levels.add(level.label)
+            self._broken_levels[level.label] = {"time": time.time(), "closes_since": 0, "confirmed": False}
             return True
         return False
 
@@ -300,6 +328,8 @@ class SPYEngine:
     def _gates_pass(self, level: Level, current_volume: float, avg_volume: float) -> tuple[bool, str]:
         if not is_trading_allowed():
             return False, "Outside trading hours"
+        if self._last_trade_ts > 0 and time.time() - self._last_trade_ts > 30:
+            return False, "Data stale (no trades in 30s)"
         sess = get_session()
         if sess.quality == 0:
             return False, f"{sess.label} — signals disabled"
@@ -318,6 +348,9 @@ class SPYEngine:
 
     async def _on_candle_close(self):
         sess = get_session()
+        atr = calc_atr(self.candles.closed_1m)
+        if atr > 0:
+            self._atr_1m = atr
         or_data = compute_opening_range(self.candles.c1m)
         levels = build_levels(
             self.candles.closed_1m,
@@ -377,10 +410,9 @@ class SPYEngine:
             if triggered:
                 break
 
-        # Check for 5m candle close
-        cur_5m_count = len(self.candles.closed_5m)
-        if cur_5m_count > self._last_5m_count and cur_5m_count > 0:
-            self._last_5m_count = cur_5m_count
+        # Check for 5m candle close (timestamp-based, not count-based)
+        if self.candles.closed_5m and self.candles.closed_5m[-1].t > self._last_5m_ts:
+            self._last_5m_ts = self.candles.closed_5m[-1].t
             await self._on_5m_candle_close()
 
     async def _on_5m_candle_close(self):
@@ -390,12 +422,27 @@ class SPYEngine:
         last_5m = self.candles.closed_5m[-1]
         avg_v = calc_avg_vol(self.candles.closed_5m)
 
+        # Confirm pending breakouts (2 consecutive 5m closes on breakout side)
+        for label, info in list(self._broken_levels.items()):
+            if info.get("confirmed"):
+                continue
+            info["closes_since"] = info.get("closes_since", 0) + 1
+            lvl = next((l for l in self._current_levels if l.label == label), None)
+            if lvl:
+                on_right_side = (last_5m.c > lvl.price) or (last_5m.c < lvl.price)
+                if info["closes_since"] >= 2 and on_right_side:
+                    info["confirmed"] = True
+                    self._log(f"Breakout CONFIRMED: {label}", "success")
+                elif info["closes_since"] >= 3 and not on_right_side:
+                    del self._broken_levels[label]
+                    self._log(f"Breakout FAILED: {label}", "info")
+
         for level in self._current_levels:
             if level.price <= 0:
                 continue
 
-            # Check breakout first
-            if self._check_and_record_breakout(last_5m, level):
+            # Check breakout first (with volume confirmation)
+            if self._check_and_record_breakout(last_5m, level, avg_v):
                 passed, reason = self._gates_pass(level, last_5m.v, avg_v)
                 if not passed:
                     self._log(f"BREAKOUT gate: {reason}")
@@ -435,35 +482,88 @@ class SPYEngine:
 
     # ── Agent runner ──────────────────────────────────────
 
+    def _build_context_snapshot(self, price: float, level: Level) -> str:
+        from .market_utils import detect_trend_with_strength, calc_vwap
+        lines = []
+        # Recent candles
+        c1m = self.candles.closed_1m[-5:]
+        if c1m:
+            lines.append("RECENT 1m CANDLES:")
+            for c in c1m:
+                et = datetime.datetime.fromtimestamp(c.t / 1000, tz=_ET)
+                color = "GREEN" if c.c >= c.o else "RED"
+                lines.append(f"  {et.strftime('%H:%M')} O:{c.o:.2f} H:{c.h:.2f} L:{c.l:.2f} C:{c.c:.2f} {color}")
+        # Trend
+        c15 = self.candles.closed_15m
+        c5 = self.candles.closed_5m
+        if len(c15) >= 30:
+            d15, cnt15, str15 = detect_trend_with_strength(c15)
+            lines.append(f"\n15m TREND: {d15.value} ({str15}, {cnt15} swings)")
+        if len(c5) >= 30:
+            d5, cnt5, str5 = detect_trend_with_strength(c5)
+            lines.append(f"5m TREND: {d5.value} ({str5}, {cnt5} swings)")
+        # CVD
+        cvd_val = self.cvd.value
+        cvd_bias = self.cvd.bias
+        div = self.cvd.detect_divergence(self.candles.closed_1m)
+        lines.append(f"\nCVD: {cvd_val:+,.0f} ({cvd_bias})")
+        if div["type"] != "NONE":
+            lines.append(f"CVD DIVERGENCE: {div['detail']}")
+        # Levels
+        above = sorted([l for l in self._current_levels if l.price > price + 0.10], key=lambda l: l.price)[:5]
+        below = sorted([l for l in self._current_levels if l.price < price - 0.10], key=lambda l: l.price, reverse=True)[:5]
+        lines.append(f"\nLEVELS (price ${price:.2f}, ATR ${self._atr_1m:.3f}):")
+        for l in above:
+            d = l.price - price
+            lines.append(f"  {l.label:8} ${l.price:.2f} +${d:.2f} ({d/self._atr_1m:.1f}x ATR) {l.type}")
+        lines.append(f"  ──── ${price:.2f} PRICE ────")
+        for l in below:
+            d = price - l.price
+            lines.append(f"  {l.label:8} ${l.price:.2f} -${d:.2f} ({d/self._atr_1m:.1f}x ATR) {l.type}")
+        # Session + VIX
+        sess = get_session()
+        lines.append(f"\nSESSION: {sess.label} (quality {sess.quality}/5, {sess.min_remaining}min left)")
+        if self.vix_val:
+            lines.append(f"VIX: {self.vix_val:.1f}")
+        # VWAP
+        today_1m = self.candles.today_candles_1m
+        if today_1m:
+            vwap = calc_vwap(today_1m)
+            pos = "ABOVE" if price > vwap else "BELOW"
+            lines.append(f"VWAP: ${vwap:.2f} (price {pos})")
+        return "\n".join(lines)
+
     async def _run_agent(self, price: float, level: Level, trigger_pattern: str):
         from .agent.agent import run_agent
 
         pattern_descriptions = {
-            "STOP_HUNT": "STOP HUNT detected — 1m candle swept past level then reversed. Institutions hunted retail stops. Highest probability reversal setup.",
-            "REJECTION": "REJECTION detected — 1m candle pushed into level with large wick, body closed on opposite side. Sellers/buyers defending the level.",
-            "RETEST": "RETEST detected — previously broken level being retested as new S/R. Price returned to level and held. Classic continuation entry.",
-            "BREAKOUT": "BREAKOUT detected — 5m candle closed beyond the level. Directional move confirmed on 5m. Look for retest or continuation.",
-            "TOUCH": "LEVEL TOUCH detected — 5m candle interacted with level. Investigate for rejection or breakout.",
+            "STOP_HUNT": "STOP HUNT — 1m candle swept past level then reversed. Institutions hunted retail stops.",
+            "REJECTION": "REJECTION — 1m candle pushed into level with large wick, body closed on opposite side.",
+            "RETEST": "RETEST — previously broken level being retested as new S/R. Price returned and held.",
+            "BREAKOUT": "BREAKOUT — 5m candle closed beyond level with volume. Directional move confirmed.",
+            "TOUCH": "TOUCH — 5m candle interacted with level. Investigate for rejection or breakout.",
         }
         pattern_desc = pattern_descriptions.get(trigger_pattern, trigger_pattern)
 
-        test_history = self._level_tests.get(level.label, [])
+        test_history = self._level_tests.get(level.label.upper(), [])
         if test_history:
             history_str = f"Tests at {level.label} today ({len(test_history)} total):\n"
             for t in test_history:
-                history_str += (
-                    f"  {t.get('time_et', '?')} {t.get('result', '?')} "
-                    f"H:{t.get('candle_high', 0):.2f} L:{t.get('candle_low', 0):.2f} C:{t.get('candle_close', 0):.2f}\n"
-                )
+                history_str += f"  {t.get('time_et', '?')} {t.get('result', '?')} H:{t.get('candle_high', 0):.2f} L:{t.get('candle_low', 0):.2f} C:{t.get('candle_close', 0):.2f}\n"
         else:
             history_str = f"First test of {level.label} today — fresh level.\n"
+
+        context = self._build_context_snapshot(price, level)
 
         initial_message = (
             f"SPY ${price:.2f} | {level.label} ${level.price:.2f} "
             f"({level.type}, strength {level.strength}/4) | {_get_et_time()}\n\n"
             f"TRIGGER: {pattern_desc}\n\n"
             f"{history_str}\n"
-            f"Use your tools to investigate.\nDecide: LONG, SHORT, or WAIT."
+            f"MARKET SNAPSHOT:\n{context}\n\n"
+            f"You have candles, CVD, trend, levels, and session above. "
+            f"Use tools only if you need deeper info on a specific level, OR status, or VWAP story. "
+            f"Then calculate_rr and send_signal.\nDecide: LONG, SHORT, or WAIT."
         )
 
         try:
@@ -542,6 +642,7 @@ class SPYEngine:
             self._log(f"Agent exception: {e}", "error")
 
     def _build_signal(self, args: dict, level: Level) -> Signal:
+        sess = get_session()
         return Signal(
             direction=args.get("signal", "WAIT"),
             confidence=args.get("confidence", "LOW"),
@@ -558,6 +659,10 @@ class SPYEngine:
             wait_for=args.get("wait_for", ""),
             fired_at=_get_et_time(),
             level_name=level.label,
+            vix_at_signal=self.vix_val or 0.0,
+            cvd_at_signal=self.cvd.value,
+            session_at_signal=sess.label,
+            atr_at_signal=self._atr_1m,
         )
 
     # ── Telegram ──────────────────────────────────────────
@@ -638,6 +743,8 @@ class SPYEngine:
             "pattern": s.pattern, "narrative": s.narrative, "reasoning": s.reasoning,
             "invalidation": s.invalidation, "warnings": s.warnings, "wait_for": s.wait_for,
             "firedAt": s.fired_at, "levelName": s.level_name,
+            "vix": s.vix_at_signal, "cvd": s.cvd_at_signal,
+            "session": s.session_at_signal, "atr": s.atr_at_signal,
         }
 
     def _get_push_payload(self) -> dict:

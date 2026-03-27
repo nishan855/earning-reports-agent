@@ -522,7 +522,7 @@ function renderFullState(d) {
   } else if (d.orHigh > 0) {
     orEl.textContent = 'FORMING'; orEl.style.color = 'var(--purple)';
   } else {
-    orEl.textContent = '--'; orEl.style.color = 'var(--text-muted)';
+    orEl.textContent = 'PRE-OPEN'; orEl.style.color = 'var(--text-muted)';
   }
 
   const cvdBiasTop = document.getElementById('top-cvd-bias');

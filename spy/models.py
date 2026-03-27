@@ -102,6 +102,10 @@ class Signal:
     wait_for: str = ""
     fired_at: str = ""
     level_name: str = ""
+    vix_at_signal: float = 0.0
+    cvd_at_signal: float = 0.0
+    session_at_signal: str = ""
+    atr_at_signal: float = 0.0
 
 
 @dataclass

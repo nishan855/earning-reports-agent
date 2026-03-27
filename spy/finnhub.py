@@ -55,11 +55,18 @@ class FinnhubClient:
 
     async def connect_ws(self, symbol: str, on_trade):
         import websockets
+        from .sessions import is_market_open
+        backoff = 5
         while True:
+            if not is_market_open():
+                await asyncio.sleep(60)
+                backoff = 5
+                continue
             try:
                 async with websockets.connect(f"{self.WS}?token={self._key}") as ws:
                     await ws.send(json.dumps({"type": "subscribe", "symbol": symbol}))
                     print(f"Finnhub WS connected: {symbol}")
+                    backoff = 5
                     async for raw in ws:
                         msg = json.loads(raw)
                         if msg.get("type") != "trade":
@@ -67,8 +74,9 @@ class FinnhubClient:
                         for trade in msg.get("data", []):
                             await on_trade(trade["p"], trade["v"], trade["t"])
             except Exception as e:
-                print(f"Finnhub WS error: {e} — reconnecting in 5s")
-                await asyncio.sleep(5)
+                print(f"Finnhub WS error: {e} — reconnecting in {backoff}s")
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 120)
 
 
 def _yf_fetch_vix() -> float | None:

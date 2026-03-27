@@ -1,5 +1,5 @@
 from .sessions import get_et_now
-from .models import CVDPoint
+from .models import CVDPoint, Candle
 
 
 class CVDEngine:
@@ -10,6 +10,7 @@ class CVDEngine:
         self._history: list[CVDPoint] = []
         self._minute_cvd: float = 0.0
         self._current_minute: str = ""
+        self._total_volume: float = 0.0
 
     def process_trade(self, price: float, volume: float) -> float:
         now = get_et_now()
@@ -36,6 +37,7 @@ class CVDEngine:
                 self._cvd += volume
             elif price < self._last_price:
                 self._cvd -= volume
+        self._total_volume += volume
 
         self._last_price = price
         return self._cvd
@@ -46,9 +48,27 @@ class CVDEngine:
         self._history = []
         self._minute_cvd = 0.0
         self._current_minute = ""
+        self._total_volume = 0.0
 
     def get_history(self, minutes: int = 30) -> list[CVDPoint]:
         return self._history[-minutes:]
+
+    def detect_divergence(self, candles_1m: list[Candle], lookback: int = 10) -> dict:
+        if len(candles_1m) < lookback or len(self._history) < lookback:
+            return {"type": "NONE", "detail": "Not enough data"}
+        recent_candles = candles_1m[-lookback:]
+        recent_cvd = self._history[-lookback:]
+        price_highs = [c.h for c in recent_candles]
+        price_lows = [c.l for c in recent_candles]
+        cvd_vals = [pt.value for pt in recent_cvd]
+        mid = lookback // 2
+        # Check if price made higher high but CVD made lower high
+        if max(price_highs[mid:]) > max(price_highs[:mid]) and max(cvd_vals[mid:]) < max(cvd_vals[:mid]):
+            return {"type": "BEARISH_DIVERGENCE", "detail": "Price higher high but CVD lower — fake rally, sellers absorbing"}
+        # Check if price made lower low but CVD made higher low
+        if min(price_lows[mid:]) < min(price_lows[:mid]) and min(cvd_vals[mid:]) > min(cvd_vals[:mid]):
+            return {"type": "BULLISH_DIVERGENCE", "detail": "Price lower low but CVD higher — fake selloff, buyers absorbing"}
+        return {"type": "NONE", "detail": "No divergence"}
 
     @property
     def value(self) -> float:
@@ -56,8 +76,9 @@ class CVDEngine:
 
     @property
     def bias(self) -> str:
-        if self._cvd > 500:
+        threshold = max(self._total_volume * 0.005, 500)
+        if self._cvd > threshold:
             return "BUYERS"
-        elif self._cvd < -500:
+        elif self._cvd < -threshold:
             return "SELLERS"
         return "NEUTRAL"

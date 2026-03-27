@@ -26,8 +26,10 @@ def build_levels(
             Level(or_data.low,  "ORL", "support",    4, "OR"),
         ]
 
-    # VWAP — institutional fair value
-    vwap = calc_vwap(c1m)
+    # VWAP — institutional fair value (regular session only)
+    from .sessions import get_or_start_ts
+    session_candles = [c for c in c1m if c.t >= get_or_start_ts()]
+    vwap = calc_vwap(session_candles) if session_candles else calc_vwap(c1m)
     if vwap:
         raw.append(Level(vwap, "VWAP", "dynamic", 4, "VWAP"))
 
