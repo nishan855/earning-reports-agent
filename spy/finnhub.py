@@ -50,13 +50,8 @@ class FinnhubClient:
         return await loop.run_in_executor(_yf_pool, _yf_fetch_bars, symbol, period, interval)
 
     async def fetch_vix(self) -> float | None:
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(f"{self.BASE}/quote?symbol=VIX&token={self._key}") as resp:
-                    data = await resp.json()
-                    return data.get("c")
-        except:
-            return None
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(_yf_pool, _yf_fetch_vix)
 
     async def connect_ws(self, symbol: str, on_trade):
         import websockets
@@ -74,3 +69,22 @@ class FinnhubClient:
             except Exception as e:
                 print(f"Finnhub WS error: {e} — reconnecting in 5s")
                 await asyncio.sleep(5)
+
+
+def _yf_fetch_vix() -> float | None:
+    try:
+        ticker = yf.Ticker("^VIX")
+        hist = ticker.history(period="1d", interval="1m")
+        if hist.empty:
+            return None
+        close = hist["Close"]
+        if hasattr(close, "iloc"):
+            val = float(close.iloc[-1])
+        else:
+            val = float(close[-1])
+        if val > 100:
+            return None
+        return val
+    except Exception as e:
+        print(f"VIX yfinance fallback error: {e}")
+        return None

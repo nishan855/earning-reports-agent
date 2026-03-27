@@ -14,18 +14,27 @@ def get_session() -> Session:
     et = get_et_now()
     t  = et.hour * 60 + et.minute
 
-    if t < 240:          return Session(SessionId.CLOSED,    "CLOSED",         "#475569", 0, 99)
-    if t < 570:          return Session(SessionId.PREMARKET, "PRE-MARKET",     "#f59e0b", 2, 7)
-    if t < 570 + OR_DURATION_MINS:
-                         return Session(SessionId.OR,        "OPENING RANGE",  "#a78bfa", 3, 7)
-    if t < 660:          return Session(SessionId.POWER,     "POWER HOUR",     "#00d97e", 5, 6)
-    if t < 720:          return Session(SessionId.MID,       "MID MORNING",    "#3b82f6", 4, 6)
-    if t < 840:          return Session(SessionId.DEAD,      "DEAD ZONE",      "#ef4444", 1, 8)
-    if t < 930:          return Session(SessionId.AFT,       "AFTERNOON",      "#a78bfa", 3, 6)
-    if t < 945:          return Session(SessionId.CLOSE,     "POWER CLOSE",    "#f97316", 3, 7)
-    if t < 960:          return Session(SessionId.CLOSE,     "NO NEW TRADES",  "#ef4444", 0, 99)
-    if t < 1200:         return Session(SessionId.AH,        "AFTER HOURS",    "#64748b", 1, 99)
-    return               Session(SessionId.CLOSED,           "CLOSED",         "#475569", 0, 99)
+    boundaries = [
+        (240,                    SessionId.CLOSED,    "CLOSED",         "#475569", 0, 99),
+        (570,                    SessionId.PREMARKET, "PRE-MARKET",     "#f59e0b", 2, 7),
+        (570 + OR_DURATION_MINS, SessionId.OR,        "OPENING RANGE",  "#a78bfa", 3, 7),
+        (660,                    SessionId.POWER,     "POWER HOUR",     "#00d97e", 5, 6),
+        (720,                    SessionId.MID,       "MID MORNING",    "#3b82f6", 4, 6),
+        (840,                    SessionId.DEAD,      "DEAD ZONE",      "#ef4444", 1, 8),
+        (930,                    SessionId.AFT,       "AFTERNOON",      "#a78bfa", 3, 6),
+        (945,                    SessionId.CLOSE,     "POWER CLOSE",    "#f97316", 3, 7),
+        (960,                    SessionId.CLOSE,     "NO NEW TRADES",  "#ef4444", 0, 99),
+        (1200,                   SessionId.AH,        "AFTER HOURS",    "#64748b", 1, 99),
+    ]
+
+    prev_end = 0
+    for end, sid, label, color, quality, threshold in boundaries:
+        if t < end:
+            remaining = end - t
+            return Session(sid, label, color, quality, threshold, remaining)
+        prev_end = end
+
+    return Session(SessionId.CLOSED, "CLOSED", "#475569", 0, 99, 0)
 
 
 def is_or_complete() -> bool:

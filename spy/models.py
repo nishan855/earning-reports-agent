@@ -1,5 +1,5 @@
-from dataclasses import dataclass, field
-from typing import Optional, Literal
+from dataclasses import dataclass
+from typing import Literal
 from enum import Enum
 
 
@@ -39,6 +39,7 @@ class Session:
     color: str
     quality: int          # 0-5, 5 = best
     signal_threshold: int # min score to fire
+    min_remaining: int = 0
 
 
 @dataclass
@@ -85,71 +86,26 @@ class VixData:
 
 
 @dataclass
-class StopHunt:
-    type: Literal["BULLISH", "BEARISH"]
-    level: float
-    wick_size: float
-
-
-@dataclass
-class PriceAction:
-    type: Literal["BREAKOUT", "RETEST", "REJECTION"]
-    level: Level
-    strength: Literal["HIGH", "MEDIUM", "LOW"]
-
-
-@dataclass
-class FactorResult:
-    id: str
-    layer: Literal["CONTEXT", "SETUP", "TIMING"]
-    label: str
-    ok: bool
-    is_bonus: bool
-    val: str
-    color: str
-    reason: str
-    missing: Optional[str]
-    weight: int
-
-
-@dataclass
-class FactorEngineResult:
-    factors: list[FactorResult]
-    context_score: int
-    setup_score: int
-    timing_score: int
-    total_score: int
-    all_ok: bool
-    bias: TrendDirection
-    vwap: float
-    atr: float
-    rr: float
-    sl: float
-    tp1: float
-    tp2: float
-    near_resistance: Optional[Level]
-    near_support: Optional[Level]
-    price_action: Optional[PriceAction]
-    stop_hunt: Optional[StopHunt]
-    or_data: Optional[OpeningRange]
-    last_price: float
-    evaluated_at: int
-
-
-@dataclass
 class Signal:
-    direction: Literal["LONG", "SHORT", "SKIP"]
+    direction: Literal["LONG", "SHORT", "WAIT"]
     confidence: Literal["HIGH", "MEDIUM", "LOW"]
-    entry_type: str
     entry: float
-    stop_loss: float
+    stop: float
     tp1: float
     tp2: float
     rr: float
+    pattern: str
     narrative: str
     reasoning: str
     invalidation: str
-    size_note: str
-    key_risk: str
-    generated_at: int
-    stream_complete: bool = False
+    warnings: str = ""
+    wait_for: str = ""
+    fired_at: str = ""
+    level_name: str = ""
+
+
+@dataclass
+class CVDPoint:
+    time_et: str
+    value: float
+    delta: float
