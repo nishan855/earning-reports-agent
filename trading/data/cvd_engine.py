@@ -7,60 +7,128 @@ ET = pytz.timezone("America/New_York")
 
 
 class AssetCVDEngine:
+    """Bar-based CVD engine.
+
+    Uses 1m bar close vs open to classify volume:
+      close > open → bar volume added as "buy"
+      close < open → bar volume subtracted as "sell"
+      close == open → ignored
+
+    This produces meaningful CVD with any data source (ticks or bars)
+    unlike tick-comparison CVD which requires dense, non-batched tick data.
+    """
     def __init__(self, asset: str):
         self.asset = asset
         self._cvd: float = 0.0
-        self._last_price: float | None = None
         self._session_date: str = ""
         self._history: list[CVDPoint] = []
         self._minute_cvd: float = 0.0
         self._current_minute: str = ""
         self._total_volume: float = 0.0
+        # Track per-bar accumulation for bar-based CVD
+        self._bar_open: float = 0.0
+        self._bar_volume: float = 0.0
+        self._bar_close: float = 0.0
+        self._last_price: float = 0.0
 
     def process_trade(self, price: float, volume: float) -> float:
+        """Process a tick — accumulates volume for the current bar.
+        CVD is updated when a new minute starts (bar closes)."""
         now = now_et()
         today = now.strftime("%Y-%m-%d")
         t_min = now.hour * 60 + now.minute
-        # Reset at 9:30 AM ET (market open), not midnight
-        # This prevents pre-market volume from skewing the regular session baseline
+
+        # Reset at 9:30 AM ET
         if today != self._session_date and t_min >= 570:
             self.reset()
             self._session_date = today
         elif today == self._session_date and t_min == 570 and self._total_volume > 0:
-            # Crossed into 9:30 on same day — reset pre-market accumulation
             if self._current_minute and self._current_minute < "09:30":
                 self.reset()
                 self._session_date = today
 
         minute_key = now.strftime("%H:%M")
         if minute_key != self._current_minute:
-            if self._current_minute:
+            # New minute — close the previous bar and calculate CVD delta
+            if self._current_minute and self._bar_volume > 0:
+                # Bar-based CVD: close > open = buy volume, close < open = sell volume
+                if self._bar_close > self._bar_open:
+                    self._cvd += self._bar_volume
+                    delta = self._bar_volume
+                elif self._bar_close < self._bar_open:
+                    self._cvd -= self._bar_volume
+                    delta = -self._bar_volume
+                else:
+                    delta = 0
+
                 self._history.append(CVDPoint(
                     time_et=self._current_minute,
                     value=self._cvd,
-                    delta=self._cvd - self._minute_cvd,
+                    delta=delta,
                 ))
                 if len(self._history) > 60:
                     self._history = self._history[-60:]
+
             self._minute_cvd = self._cvd
             self._current_minute = minute_key
+            # Start new bar
+            self._bar_open = price
+            self._bar_volume = 0.0
+            self._bar_close = price
 
-        if self._last_price is not None:
-            if price > self._last_price:
-                self._cvd += volume
-            elif price < self._last_price:
-                self._cvd -= volume
-        self._total_volume += volume
+        # Accumulate volume and track close price for this bar
+        self._bar_volume += volume
+        self._bar_close = price
         self._last_price = price
+        self._total_volume += volume
+        return self._cvd
+
+    def process_bar(self, bar) -> float:
+        """Process a complete 1m bar directly (for backtesting).
+        Avoids the tick-by-tick path entirely."""
+        now = now_et()
+        today = now.strftime("%Y-%m-%d")
+        t_min = now.hour * 60 + now.minute
+
+        if today != self._session_date and t_min >= 570:
+            self.reset()
+            self._session_date = today
+
+        if bar.c > bar.o:
+            self._cvd += bar.v
+            delta = bar.v
+        elif bar.c < bar.o:
+            self._cvd -= bar.v
+            delta = -bar.v
+        else:
+            delta = 0
+
+        minute_key = now.strftime("%H:%M")
+        self._history.append(CVDPoint(
+            time_et=minute_key,
+            value=self._cvd,
+            delta=delta,
+        ))
+        if len(self._history) > 60:
+            self._history = self._history[-60:]
+
+        self._minute_cvd = self._cvd
+        self._current_minute = minute_key
+        self._total_volume += bar.v
+        self._last_price = bar.c
         return self._cvd
 
     def reset(self):
         self._cvd = 0.0
-        self._last_price = None
+        self._session_date = ""
         self._history = []
         self._minute_cvd = 0.0
         self._current_minute = ""
         self._total_volume = 0.0
+        self._bar_open = 0.0
+        self._bar_volume = 0.0
+        self._bar_close = 0.0
+        self._last_price = 0.0
 
     def get_history(self, minutes: int = 30) -> list[CVDPoint]:
         return self._history[-minutes:]
