@@ -4,7 +4,8 @@ import re
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Request
+import os
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -14,7 +15,10 @@ load_dotenv()
 
 from agent.graph import agent
 from spy.router import router as spy_router
-from spy.engine import get_engine
+# from spy.engine import get_engine  # OLD SPY ENGINE — DISABLED
+
+from trading.core.multi_engine import MultiEngine
+from trading.models import Signal
 
 CACHE_TTL = 86400
 _cache: dict[str, dict] = {}
@@ -51,9 +55,30 @@ async def _cache_cleanup_loop():
 async def lifespan(_app: FastAPI):
     logger.info("Qern API ready")
     task = asyncio.create_task(_cache_cleanup_loop())
-    await get_engine().start()
+
+    # ── OLD SPY ENGINE — DISABLED ──────────────
+    # Replaced by trading/ multi-asset system.
+    # await get_engine().start()
+    # ────────────────────────────────────────────
+
+    # ── NEW TRADING ENGINE ─────────────────────
+    sim_mode = os.getenv("SIM_MODE", "").lower() in ("1", "true", "yes")
+    logger.info("=" * 50)
+    logger.info("OLD SPY ENGINE:    DISABLED")
+    logger.info(f"NEW TRADING ENGINE: {'SIMULATION' if sim_mode else 'LIVE'}")
+    logger.info("Dashboard:  /trading")
+    logger.info("WebSocket:  /ws/trading")
+    if sim_mode:
+        logger.info("Simulate:   GET /trading/simulate?speed=0.05")
+    logger.info("=" * 50)
+    if sim_mode:
+        trading_task = asyncio.create_task(trading_engine.start_simulation())
+    else:
+        trading_task = asyncio.create_task(trading_engine.start())
+
     yield
     task.cancel()
+    trading_task.cancel()
 
 
 app = FastAPI(
@@ -185,3 +210,202 @@ async def analyze(ticker: str, request: Request):
     logger.info(f"Cache STORE for {ticker}")
 
     return response
+
+
+# ══════════════════════════════════════════════════
+# NEW MULTI-ASSET TRADING ENGINE
+# ══════════════════════════════════════════════════
+
+class TradingWSManager:
+    def __init__(self):
+        self._clients: list[WebSocket] = []
+
+    async def connect(self, ws: WebSocket):
+        await ws.accept()
+        self._clients.append(ws)
+
+    def disconnect(self, ws: WebSocket):
+        if ws in self._clients:
+            self._clients.remove(ws)
+
+    async def broadcast(self, data: dict):
+        dead = []
+        for client in self._clients:
+            try:
+                await client.send_json(data)
+            except Exception:
+                dead.append(client)
+        for d in dead:
+            self.disconnect(d)
+
+
+trading_ws = TradingWSManager()
+
+from trading.notifications.telegram import TelegramNotifier
+telegram = TelegramNotifier()
+
+
+async def _on_tick(data: dict):
+    await trading_ws.broadcast(data)
+
+
+_all_signals: list[dict] = []
+
+
+def _signal_to_dict(signal: Signal) -> dict:
+    return {
+        "asset": signal.asset, "direction": signal.direction,
+        "confidence": signal.confidence, "confidence_pct": signal.confidence_pct,
+        "pattern": signal.pattern,
+        "level_name": signal.level_name, "level_price": signal.level_price,
+        "entry": signal.entry, "stop": signal.stop,
+        "tp1": signal.tp1, "tp2": signal.tp2, "rr": signal.rr,
+        "option_type": signal.option_type, "strike": signal.strike,
+        "expiry_date": signal.expiry_date, "dte": signal.dte, "size": signal.size,
+        "est_premium_lo": signal.est_premium_lo, "est_premium_hi": signal.est_premium_hi,
+        "breakeven": signal.breakeven, "instrument": signal.instrument,
+        "narrative": signal.narrative, "reasoning": signal.reasoning,
+        "invalidation": signal.invalidation, "warnings": signal.warnings,
+        "wait_for": signal.wait_for, "fired_at": signal.fired_at,
+        "session": signal.session, "vix_at_signal": signal.vix_at_signal,
+        "timestamp": time.time(),
+    }
+
+
+async def _on_signal(signal: Signal):
+    sig_dict = _signal_to_dict(signal)
+
+    # Store in memory (all signals including WAIT)
+    _all_signals.append(sig_dict)
+    if len(_all_signals) > 200:
+        _all_signals[:] = _all_signals[-200:]
+
+    # Send to Telegram (skip WAIT signals)
+    if signal.direction != "WAIT":
+        try:
+            await telegram.send_signal(signal)
+        except Exception as e:
+            logger.error(f"[Telegram] Error: {e}")
+
+    # Broadcast to WebSocket dashboard (all signals)
+    await trading_ws.broadcast({
+        "type": "signal_complete",
+        "asset": signal.asset,
+        "signal": sig_dict,
+    })
+
+
+async def _on_state(data: dict):
+    await trading_ws.broadcast(data)
+
+
+trading_engine = MultiEngine(
+    finnhub_key=os.getenv("FINNHUB_KEY", ""),
+    openai_key=os.getenv("OPENAI_KEY", ""),
+    on_signal=_on_signal,
+    on_tick=_on_tick,
+    on_state=_on_state,
+)
+
+
+@app.get("/trading")
+async def trading_dashboard():
+    return FileResponse("frontend/trading.html")
+
+
+@app.websocket("/ws/trading")
+async def trading_websocket(ws: WebSocket):
+    await trading_ws.connect(ws)
+    try:
+        assets_state = [trading_engine.get_asset_state(a) for a in ["SPY", "QQQ", "AAPL", "NVDA", "TSLA", "MSFT", "META", "AMZN"]]
+        await ws.send_json({"type": "state", "vix": trading_engine._vix, "session": trading_engine._get_session_label(), "assets": assets_state})
+        # Send bars + levels for all 8 assets on connect
+        for asset in ["SPY", "QQQ", "AAPL", "NVDA", "TSLA", "MSFT", "META", "AMZN"]:
+            try:
+                detail = trading_engine.get_asset_state(asset, include_bars=True)
+                await ws.send_json({"type": "asset_detail", "asset": asset, "data": detail})
+            except Exception:
+                pass
+    except Exception as e:
+        logger.error(f"[WS] Initial state error: {e}")
+    try:
+        while True:
+            msg = await ws.receive_text()
+            if msg == "ping":
+                await ws.send_json({"type": "pong"})
+            elif msg.startswith("select:"):
+                asset = msg.split(":")[1].strip().upper()
+                if asset in ["SPY","QQQ","AAPL","NVDA","TSLA","MSFT","META","AMZN"]:
+                    detail = trading_engine.get_asset_state(asset, include_bars=True)
+                    await ws.send_json({"type": "asset_detail", "asset": asset, "data": detail})
+    except WebSocketDisconnect:
+        trading_ws.disconnect(ws)
+    except Exception:
+        trading_ws.disconnect(ws)
+
+
+@app.get("/trading/state")
+async def trading_state():
+    try:
+        assets = [trading_engine.get_asset_state(a) for a in ["SPY", "QQQ", "AAPL", "NVDA", "TSLA", "MSFT", "META", "AMZN"]]
+        return {"status": "ok", "vix": trading_engine._vix, "session": trading_engine._get_session_label(), "assets": assets}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
+
+@app.get("/trading/health")
+async def trading_health():
+    """Per-asset data health: HEALTHY, DEGRADED, or STALE."""
+    try:
+        return {
+            "status": "ok",
+            "assets": {
+                a: {
+                    "data_health": trading_engine._health[a].status,
+                    "bars_backfilled": trading_engine._health[a].bars_backfilled,
+                    "ws_disconnects": trading_engine._health[a].ws_disconnects,
+                    "last_validated": trading_engine._health[a].last_validated_at,
+                }
+                for a in ["SPY", "QQQ", "AAPL", "NVDA", "TSLA", "MSFT", "META", "AMZN"]
+            },
+        }
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
+
+@app.get("/trading/signals")
+async def trading_signals(asset: str = ""):
+    """All agent decisions (LONG, SHORT, WAIT) for today. Filter with ?asset=SPY."""
+    if asset:
+        return [s for s in _all_signals if s["asset"].upper() == asset.upper()]
+    return _all_signals
+
+
+@app.get("/trading/simulate")
+async def trading_simulate(speed: float = 0.05, day: int = 0):
+    """Replay historical data through the full pipeline (legacy — bypasses tick pipeline).
+    speed = seconds between each 1m candle (0.1 = ~40s for full day).
+    day = 0 for most recent, 1 for day before, 2 for 2 days ago, etc."""
+    asyncio.create_task(trading_engine.run_simulation(speed=speed, day_offset=day))
+    return {"status": "started", "speed": speed, "day_offset": day, "note": "Watch /trading dashboard"}
+
+
+@app.get("/trading/simulate/ticks")
+async def trading_simulate_ticks(speed: float = 0.01, day: int = 0, minutes: int = 60):
+    """Simulate 1 hour of Finnhub WebSocket ticks through the REAL tick pipeline.
+    Tests: tick→1m bars→5m/15m aggregation→heartbeat→detection→signals.
+    speed = seconds between each tick (0.01 = ~6 min for 1 hour).
+    day = 0 for most recent trading day.
+    minutes = how many minutes to replay (default 60)."""
+    asyncio.create_task(trading_engine.run_tick_simulation(speed=speed, day_offset=day, minutes=minutes))
+    est_ticks = minutes * 10 * 8  # ~10 ticks per bar × 8 assets
+    est_seconds = int(est_ticks * speed)
+    return {
+        "status": "started",
+        "speed": speed,
+        "day_offset": day,
+        "minutes": minutes,
+        "est_ticks": est_ticks,
+        "est_runtime_sec": est_seconds,
+        "note": "Watch /trading dashboard — bars build in real-time from ticks",
+    }
