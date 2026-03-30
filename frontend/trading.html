@@ -114,7 +114,10 @@ body{background:var(--bg);color:var(--text);font-family:var(--sans);font-size:13
 </style>
 </head>
 <body>
-<div id="header"><a href="/" style="text-decoration:none"><div class="logo">QERN</div></a><div style="display:flex;gap:2px;align-items:stretch;height:100%"><a href="/" class="tab-btn">Earnings</a><a class="tab-btn on" id="tab-trader" onclick="switchTab('trader')">Trader</a><a class="tab-btn" id="tab-signals" onclick="switchTab('signals')">Signals</a><a class="tab-btn" id="tab-health" onclick="switchTab('health')">Health</a></div><div class="hdr-center">Signal Engine v2.0</div><div class="hdr-right"><div class="live-dot" id="ldot"></div><span id="clock">--:--:-- ET</span></div></div>
+<div style="background:#1a1200;border-bottom:1px solid #3d2e00;padding:6px 16px;text-align:center;font-family:var(--mono);font-size:10px;color:#c9a227;letter-spacing:.04em;flex-shrink:0">
+  This is not an official financial product. Nothing on this site constitutes trading or investment advice.
+</div>
+<div id="header"><a href="/" style="text-decoration:none"><div class="logo"><span style="color:var(--green)">Q</span><span style="color:#fff">ern</span></div></a><div style="display:flex;gap:2px;align-items:stretch;height:100%"><a href="/" class="tab-btn">Earnings</a><a class="tab-btn on" id="tab-trader" onclick="switchTab('trader')">Trader</a><a class="tab-btn" id="tab-signals" onclick="switchTab('signals')">Signals</a><a class="tab-btn" id="tab-health" onclick="switchTab('health')">Health</a></div><div class="hdr-center">Signal Engine v2.0</div><div class="hdr-right"><div class="live-dot" id="ldot"></div><span id="clock">--:--:-- ET</span></div></div>
 <div id="mbar"><span class="mbar-l">VIX</span><span class="mbar-v" id="mv" style="color:var(--amber)">--</span><span class="badge bg-a" id="mvl">--</span><span style="color:var(--border)">|</span><span class="mbar-l">SESSION</span><span class="badge bg-b" id="ms">--</span><span style="color:var(--border)">|</span><span id="mprices"></span></div>
 <div id="main">
 <div id="dashboard" style="flex:1;display:flex;flex-direction:column;overflow:hidden">

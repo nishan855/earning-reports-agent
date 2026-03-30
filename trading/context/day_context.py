@@ -11,9 +11,9 @@ def assess_day_context(
     current_price: float, benchmark_price: float = 0.0, benchmark_prev: float = 0.0,
 ) -> DayContext:
     gap_pct, gap_type, gap_filled = 0.0, "FLAT", False
-    if len(daily_bars) >= 2:
-        prev_close = daily_bars[-2].c
-        today_open = daily_bars[-1].o
+    if len(daily_bars) >= 1 and bars_1m_today:
+        prev_close = daily_bars[-1].c  # last completed daily bar = yesterday's close
+        today_open = bars_1m_today[0].o  # first intraday bar = today's actual open
         if prev_close > 0:
             gap_pct = ((today_open - prev_close) / prev_close) * 100
             if gap_pct > 0.3: gap_type = "GAP_UP"

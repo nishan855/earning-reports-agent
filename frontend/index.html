@@ -458,6 +458,10 @@ cursor:pointer;transition:all .2s;
 </head>
 <body>
 
+<div class="disclaimer-banner" style="background:#1a1200;border-bottom:1px solid #3d2e00;padding:6px 16px;text-align:center;font-family:var(--font-mono);font-size:10px;color:#c9a227;letter-spacing:.04em;position:relative;z-index:10">
+  This is not an official financial product. Nothing on this site constitutes trading or investment advice.
+</div>
+
 <div class="container">
   <!-- Header -->
   <header class="header">
@@ -1597,7 +1601,7 @@ cursor:pointer;transition:all .2s;
   $('reportBtn').addEventListener('click', () => {
     if (!currentData) return;
     $('modalTitle').textContent = `Full Report: ${currentData.company || currentData.ticker || ''}`;
-    $('modalBody').innerHTML = marked.parse(currentData.report || '*No report available.*');
+    $('modalBody').innerHTML = '<div style="background:#1a1200;border:1px solid #3d2e00;border-radius:6px;padding:8px 16px;margin-bottom:20px;text-align:center;font-size:10px;color:#c9a227;letter-spacing:.04em">This is not an official financial product. Nothing on this site constitutes trading or investment advice.</div>' + marked.parse(currentData.report || '*No report available.*');
     modalOverlay.classList.add('active');
     document.body.style.overflow = 'hidden';
   });

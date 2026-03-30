@@ -1021,12 +1021,17 @@ class MultiEngine:
         store = self._candles.get(asset)
         bars = store.closed_1m if tf == "1m" else store.closed_5m
         if not bars: return 0.0
-        # Exclude OR bars (first 30 1m / first 6 5m) from average
-        # OR volume is 2-3x normal and inflates the baseline
+        # Exclude the current bar (don't let a spike dilute its own comparison)
+        prior = bars[:-1] if len(bars) > 1 else bars
+        # Exclude OR bars (first 30 1m / first 6 5m)
         or_cutoff = 30 if tf == "1m" else 6
-        non_or = bars[or_cutoff:] if len(bars) > or_cutoff else bars
+        non_or = prior[or_cutoff:] if len(prior) > or_cutoff else prior
         s = non_or[-20:]
-        return sum(c.v for c in s) / len(s) if s else 0.0
+        if not s: return 0.0
+        # Median — resistant to spikes, stable with small samples
+        vols = sorted(c.v for c in s)
+        mid = len(vols) // 2
+        return vols[mid] if len(vols) % 2 else (vols[mid - 1] + vols[mid]) / 2
 
     def _calc_atr(self, asset, period=14):
         bars = self._candles.get(asset).closed_1m[-(period+1):]
