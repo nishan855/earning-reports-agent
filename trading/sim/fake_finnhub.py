@@ -29,7 +29,7 @@ import yfinance as yf
 from datetime import datetime
 
 ET = pytz.timezone("America/New_York")
-ASSETS = ["SPY", "QQQ", "AAPL", "NVDA", "TSLA", "MSFT", "META", "AMZN"]
+ASSETS = ["SPY", "QQQ", "AAPL", "NVDA", "TSLA", "MSFT", "META", "AMZN", "JPM", "XLE", "GLD", "BA"]
 
 
 def load_replay_data(day_offset: int = 0, minutes: int = 0) -> dict:

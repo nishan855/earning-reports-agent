@@ -132,6 +132,10 @@ class LevelState:
     cvd_at_retest: float = 0.0
     expires_at: float = 0.0
     signal_fired: bool = False
+    uncertain: bool = False  # True when WS resync happened mid-track
+    agent_call_count: int = 0  # incremented each time agent is called for this tracker
+    atr_5m: float = 0.5  # 5m ATR at breakout time (for retest proximity)
+    break_range: float = 0.0  # breakout candle range (for retest bar size check)
 
 
 @dataclass
@@ -158,6 +162,7 @@ class Signal:
     level_name: str
     level_price: float
     confidence_pct: int = 0
+    approach_type: str = ""
     entry: float = 0.0
     stop: float = 0.0
     tp1: float = 0.0

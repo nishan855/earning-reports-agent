@@ -18,6 +18,7 @@ from spy.router import router as spy_router
 # from spy.engine import get_engine  # OLD SPY ENGINE — DISABLED
 
 from trading.core.multi_engine import MultiEngine
+from trading.constants import ASSETS
 from trading.models import Signal
 
 CACHE_TTL = 86400
@@ -256,6 +257,7 @@ def _signal_to_dict(signal: Signal) -> dict:
     return {
         "asset": signal.asset, "direction": signal.direction,
         "confidence": signal.confidence, "confidence_pct": signal.confidence_pct,
+        "approach_type": signal.approach_type,
         "pattern": signal.pattern,
         "level_name": signal.level_name, "level_price": signal.level_price,
         "entry": signal.entry, "stop": signal.stop,
@@ -317,10 +319,10 @@ async def trading_dashboard():
 async def trading_websocket(ws: WebSocket):
     await trading_ws.connect(ws)
     try:
-        assets_state = [trading_engine.get_asset_state(a) for a in ["SPY", "QQQ", "AAPL", "NVDA", "TSLA", "MSFT", "META", "AMZN"]]
+        assets_state = [trading_engine.get_asset_state(a) for a in ASSETS]
         await ws.send_json({"type": "state", "vix": trading_engine._vix, "session": trading_engine._get_session_label(), "assets": assets_state})
         # Send bars + levels for all 8 assets on connect
-        for asset in ["SPY", "QQQ", "AAPL", "NVDA", "TSLA", "MSFT", "META", "AMZN"]:
+        for asset in ASSETS:
             try:
                 detail = trading_engine.get_asset_state(asset, include_bars=True)
                 await ws.send_json({"type": "asset_detail", "asset": asset, "data": detail})
@@ -335,7 +337,7 @@ async def trading_websocket(ws: WebSocket):
                 await ws.send_json({"type": "pong"})
             elif msg.startswith("select:"):
                 asset = msg.split(":")[1].strip().upper()
-                if asset in ["SPY","QQQ","AAPL","NVDA","TSLA","MSFT","META","AMZN"]:
+                if asset in ASSETS:
                     detail = trading_engine.get_asset_state(asset, include_bars=True)
                     await ws.send_json({"type": "asset_detail", "asset": asset, "data": detail})
     except WebSocketDisconnect:
@@ -347,7 +349,7 @@ async def trading_websocket(ws: WebSocket):
 @app.get("/trading/state")
 async def trading_state():
     try:
-        assets = [trading_engine.get_asset_state(a) for a in ["SPY", "QQQ", "AAPL", "NVDA", "TSLA", "MSFT", "META", "AMZN"]]
+        assets = [trading_engine.get_asset_state(a) for a in ASSETS]
         return {"status": "ok", "vix": trading_engine._vix, "session": trading_engine._get_session_label(), "assets": assets}
     except Exception as e:
         return {"status": "error", "detail": str(e)}
@@ -366,7 +368,7 @@ async def trading_health():
                     "ws_disconnects": trading_engine._health[a].ws_disconnects,
                     "last_validated": trading_engine._health[a].last_validated_at,
                 }
-                for a in ["SPY", "QQQ", "AAPL", "NVDA", "TSLA", "MSFT", "META", "AMZN"]
+                for a in ASSETS
             },
         }
     except Exception as e:

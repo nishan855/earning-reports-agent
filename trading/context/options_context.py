@@ -25,22 +25,38 @@ def get_strike(asset: str, price: float, direction: str, vix: float) -> float:
     return atm + minor if direction == "BULLISH" else atm - minor
 
 
-def get_expiry(asset: str, signal_hour: float, confidence: str = "MEDIUM") -> tuple[int, str]:
+def get_expiry(asset: str, signal_hour: float = 0, confidence: str = "MEDIUM") -> tuple:
+    """
+    Returns (dte: int, expiry_date_str: str, skip: bool).
+
+    Rolling Fridays model — NO skip days:
+      Monday:     Current Friday  (4 DTE)
+      Tuesday:    Current Friday  (3 DTE)
+      Wednesday:  Current Friday  (2 DTE)
+      Thursday:   NEXT Friday     (8 DTE)
+      Friday:     NEXT Friday     (7 DTE)
+
+    Thursday and Friday shift forward one week to maintain 2-5 DTE minimum
+    and avoid 0-1 DTE gamma/theta traps. skip is always False.
+    """
     now = now_et()
-    dow = now.weekday()
-    daily_exp = has_daily_expiry(asset)
-    if signal_hour < 11.0:
-        dte = 0 if (dow == 4 and daily_exp) else (1 if daily_exp else 2)
-    elif signal_hour < 13.0:
-        dte = 1 if daily_exp else 2
-    elif signal_hour < 14.5:
-        dte = 0 if daily_exp else 1
-    else:
-        dte = 0
-    if confidence == "HIGH" and dte < 2:
-        dte = min(dte + 1, 3)
-    expiry_dt = now + timedelta(days=dte)
-    return dte, expiry_dt.strftime("%b %d")
+    dow = now.weekday()  # 0=Mon 4=Fri
+
+    # Current week's Friday
+    days_to_cur_fri = 4 - dow
+    cur_friday = now.date() + timedelta(days=days_to_cur_fri)
+
+    # Next week's Friday
+    next_friday = cur_friday + timedelta(days=7)
+
+    if dow <= 2:  # Mon (0), Tue (1), Wed (2) → current Friday
+        expiry = cur_friday
+    else:  # Thu (3), Fri (4) → next Friday
+        expiry = next_friday
+
+    dte = (expiry - now.date()).days
+    expiry_str = expiry.strftime("%b %d")
+    return dte, expiry_str, False
 
 
 def estimate_premium(price: float, vix: float) -> tuple[float, float]:

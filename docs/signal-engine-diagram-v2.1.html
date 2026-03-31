@@ -1,0 +1,1388 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Signal Engine v2.1 — Implementation Diagram</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600&family=Space+Grotesk:wght@300;400;500;600&display=swap');
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #0a0c0f;
+    --surface: #111418;
+    --surface2: #181c22;
+    --border: #1e2530;
+    --border2: #252d3a;
+    --text: #c8d0dc;
+    --text2: #6b7a8f;
+    --text3: #3d4a5c;
+    --accent: #3b82f6;
+    --accent2: #1d4ed8;
+    --green: #10b981;
+    --green2: #065f46;
+    --amber: #f59e0b;
+    --amber2: #78350f;
+    --red: #ef4444;
+    --red2: #7f1d1d;
+    --purple: #8b5cf6;
+    --purple2: #3b0764;
+    --teal: #06b6d4;
+    --teal2: #164e63;
+    --coral: #f97316;
+    --coral2: #7c2d12;
+    --mono: 'JetBrains Mono', monospace;
+    --sans: 'Space Grotesk', sans-serif;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 11px;
+    line-height: 1.5;
+    padding: 32px;
+    min-width: 1400px;
+  }
+
+  /* HEADER */
+  .header {
+    display: flex;
+    align-items: baseline;
+    gap: 24px;
+    margin-bottom: 40px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  .header h1 {
+    font-family: var(--sans);
+    font-size: 22px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    color: #fff;
+  }
+  .header .version {
+    font-size: 10px;
+    color: var(--accent);
+    background: rgba(59,130,246,0.1);
+    border: 1px solid rgba(59,130,246,0.3);
+    padding: 2px 8px;
+    border-radius: 4px;
+    letter-spacing: 0.1em;
+    font-weight: 500;
+  }
+  .header .meta {
+    margin-left: auto;
+    font-size: 10px;
+    color: var(--text3);
+    text-align: right;
+  }
+
+  /* LEGEND */
+  .legend {
+    display: flex;
+    gap: 24px;
+    margin-bottom: 32px;
+    flex-wrap: wrap;
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 10px;
+    color: var(--text2);
+  }
+  .legend-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 2px;
+  }
+
+  /* LAYOUT */
+  .diagram {
+    display: grid;
+    grid-template-columns: 200px 1fr 200px;
+    gap: 0;
+    position: relative;
+  }
+
+  .col-left { display: flex; flex-direction: column; gap: 0; }
+  .col-center { border-left: 1px solid var(--border); border-right: 1px solid var(--border); }
+  .col-right { display: flex; flex-direction: column; gap: 0; }
+
+  /* SECTION */
+  .section {
+    padding: 20px;
+    border-bottom: 1px solid var(--border);
+    position: relative;
+  }
+  .section:last-child { border-bottom: none; }
+
+  .section-label {
+    font-size: 9px;
+    font-weight: 600;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--text3);
+    margin-bottom: 12px;
+  }
+
+  /* NODE */
+  .node {
+    background: var(--surface);
+    border: 1px solid var(--border2);
+    border-radius: 6px;
+    padding: 10px 12px;
+    margin-bottom: 8px;
+    position: relative;
+  }
+  .node:last-child { margin-bottom: 0; }
+  .node-title {
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text);
+    margin-bottom: 3px;
+    font-family: var(--sans);
+  }
+  .node-sub {
+    font-size: 10px;
+    color: var(--text2);
+    line-height: 1.4;
+  }
+  .node-code {
+    font-size: 9px;
+    color: var(--teal);
+    margin-top: 4px;
+    line-height: 1.5;
+  }
+
+  /* GATE */
+  .gate {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    margin-bottom: 10px;
+    padding: 10px 12px;
+    border-radius: 6px;
+    border: 1px solid var(--border2);
+    background: var(--surface);
+  }
+  .gate:last-child { margin-bottom: 0; }
+  .gate-num {
+    font-size: 10px;
+    font-weight: 600;
+    color: #fff;
+    background: var(--text3);
+    border-radius: 3px;
+    width: 22px;
+    height: 22px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    font-family: var(--sans);
+    margin-top: 1px;
+  }
+  .gate-body { flex: 1; }
+  .gate-name {
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text);
+    font-family: var(--sans);
+    margin-bottom: 2px;
+  }
+  .gate-rule {
+    font-size: 9px;
+    color: var(--amber);
+    margin-bottom: 2px;
+    letter-spacing: 0.02em;
+  }
+  .gate-note {
+    font-size: 9px;
+    color: var(--text2);
+    line-height: 1.4;
+  }
+  .gate-pass {
+    font-size: 9px;
+    color: var(--text3);
+    margin-top: 2px;
+  }
+
+  /* Gate color variants */
+  .gate.g-halt { border-color: rgba(239,68,68,0.3); background: rgba(239,68,68,0.05); }
+  .gate.g-halt .gate-num { background: var(--red); }
+  .gate.g-location { border-color: rgba(59,130,246,0.3); background: rgba(59,130,246,0.05); }
+  .gate.g-location .gate-num { background: var(--accent); }
+  .gate.g-approach { border-color: rgba(139,92,246,0.3); background: rgba(139,92,246,0.05); }
+  .gate.g-approach .gate-num { background: var(--purple); }
+  .gate.g-vol { border-color: rgba(245,158,11,0.3); background: rgba(245,158,11,0.05); }
+  .gate.g-vol .gate-num { background: var(--amber); color: #000; }
+  .gate.g-price { border-color: rgba(6,182,212,0.3); background: rgba(6,182,212,0.05); }
+  .gate.g-price .gate-num { background: var(--teal); color: #000; }
+  .gate.g-cvd { border-color: rgba(16,185,129,0.3); background: rgba(16,185,129,0.05); }
+  .gate.g-cvd .gate-num { background: var(--green); color: #000; }
+  .gate.g-conf { border-color: rgba(249,115,22,0.3); background: rgba(249,115,22,0.05); }
+  .gate.g-conf .gate-num { background: var(--coral); color: #000; }
+  .gate.g-confirm { border-color: rgba(139,92,246,0.2); }
+  .gate.g-confirm .gate-num { background: var(--purple2); color: var(--purple); border: 1px solid var(--purple); }
+  .gate.g-hard { border-color: rgba(239,68,68,0.2); }
+  .gate.g-hard .gate-num { background: var(--red2); color: var(--red); border: 1px solid var(--red); }
+
+  /* SETUP */
+  .setup {
+    border-radius: 6px;
+    border: 1px solid var(--border2);
+    overflow: hidden;
+    margin-bottom: 10px;
+  }
+  .setup:last-child { margin-bottom: 0; }
+  .setup-header {
+    padding: 8px 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .setup-num {
+    font-size: 9px;
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: 3px;
+    letter-spacing: 0.05em;
+  }
+  .setup-name {
+    font-size: 11px;
+    font-weight: 500;
+    font-family: var(--sans);
+    color: var(--text);
+  }
+  .setup-trigger {
+    margin-left: auto;
+    font-size: 9px;
+    color: var(--text2);
+  }
+  .setup-body {
+    padding: 8px 12px 10px;
+    border-top: 1px solid var(--border);
+    background: var(--bg);
+  }
+  .setup-row {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 5px;
+  }
+  .setup-row:last-child { margin-bottom: 0; }
+  .setup-key {
+    font-size: 9px;
+    color: var(--text3);
+    width: 60px;
+    flex-shrink: 0;
+    padding-top: 1px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+  .setup-val {
+    font-size: 9px;
+    color: var(--text2);
+    flex: 1;
+    line-height: 1.5;
+  }
+  .setup-val code {
+    color: var(--amber);
+    font-family: var(--mono);
+  }
+  .setup-val .hi { color: var(--teal); }
+
+  .setup.s-liq .setup-header { background: rgba(59,130,246,0.08); }
+  .setup.s-liq .setup-num { background: rgba(59,130,246,0.2); color: var(--accent); }
+  .setup.s-def .setup-header { background: rgba(16,185,129,0.08); }
+  .setup.s-def .setup-num { background: rgba(16,185,129,0.2); color: var(--green); }
+  .setup.s-fa .setup-header { background: rgba(245,158,11,0.08); }
+  .setup.s-fa .setup-num { background: rgba(245,158,11,0.2); color: var(--amber); }
+  .setup.s-fb .setup-header { background: rgba(239,68,68,0.08); }
+  .setup.s-fb .setup-num { background: rgba(239,68,68,0.2); color: var(--red); }
+
+  /* APPROACH */
+  .approach {
+    border-radius: 5px;
+    border: 1px solid var(--border2);
+    padding: 8px 10px;
+    margin-bottom: 7px;
+    background: var(--surface);
+  }
+  .approach:last-child { margin-bottom: 0; }
+  .approach-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 5px;
+  }
+  .approach-badge {
+    font-size: 8px;
+    font-weight: 600;
+    padding: 1px 5px;
+    border-radius: 3px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+  .approach-priority {
+    font-size: 9px;
+    color: var(--text3);
+    margin-left: auto;
+  }
+  .approach-rule {
+    font-size: 9px;
+    color: var(--text2);
+    line-height: 1.5;
+  }
+  .approach-rule code { color: var(--amber); font-family: var(--mono); }
+
+  .ap-agg .approach-badge { background: rgba(239,68,68,0.15); color: var(--red); }
+  .ap-abs .approach-badge { background: rgba(16,185,129,0.15); color: var(--green); }
+  .ap-exh .approach-badge { background: rgba(245,158,11,0.15); color: var(--amber); }
+  .ap-mom .approach-badge { background: rgba(59,130,246,0.15); color: var(--accent); }
+  .ap-neu .approach-badge { background: rgba(100,100,100,0.15); color: var(--text2); }
+
+  /* CONFIDENCE SCORING */
+  .score-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 9px;
+  }
+  .score-table th {
+    color: var(--text3);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 500;
+    padding: 4px 6px;
+    border-bottom: 1px solid var(--border);
+    text-align: left;
+  }
+  .score-table td {
+    padding: 5px 6px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text2);
+    vertical-align: top;
+  }
+  .score-table tr:last-child td { border-bottom: none; }
+  .score-table .component { color: var(--text); font-weight: 500; font-family: var(--sans); font-size: 10px; }
+  .score-table .max { color: var(--coral); font-weight: 600; text-align: center; }
+  .score-bar {
+    height: 3px;
+    border-radius: 2px;
+    margin-top: 3px;
+    background: var(--border2);
+    position: relative;
+  }
+  .score-bar-fill {
+    position: absolute;
+    left: 0;
+    top: 0;
+    height: 100%;
+    border-radius: 2px;
+    background: var(--coral);
+  }
+
+  /* SIGNAL OUTPUT */
+  .signal-box {
+    border-radius: 6px;
+    border: 1px solid rgba(16,185,129,0.3);
+    background: rgba(16,185,129,0.05);
+    padding: 12px;
+    margin-bottom: 8px;
+  }
+  .signal-box:last-child { margin-bottom: 0; }
+  .signal-header {
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--green);
+    font-family: var(--sans);
+    margin-bottom: 8px;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+  .signal-field {
+    display: flex;
+    justify-content: space-between;
+    font-size: 9px;
+    margin-bottom: 3px;
+    gap: 8px;
+  }
+  .signal-field .k { color: var(--text3); }
+  .signal-field .v { color: var(--text2); text-align: right; }
+  .signal-field .v.hi { color: var(--amber); font-weight: 500; }
+
+  /* OPTIONS MODEL */
+  .dte-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 5px;
+    font-size: 9px;
+  }
+  .dte-day {
+    width: 28px;
+    text-align: center;
+    background: var(--surface2);
+    border: 1px solid var(--border2);
+    border-radius: 3px;
+    padding: 2px;
+    color: var(--text2);
+    font-weight: 500;
+    flex-shrink: 0;
+  }
+  .dte-expiry { color: var(--teal); flex: 1; }
+  .dte-note { color: var(--text3); }
+
+  .dte-row.blocked .dte-day { background: rgba(239,68,68,0.1); border-color: rgba(239,68,68,0.3); color: var(--red); }
+  .dte-row.blocked .dte-expiry { color: var(--red); }
+
+  /* SESSION TABLE */
+  .session-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 4px;
+    font-size: 9px;
+    padding: 4px 8px;
+    border-radius: 4px;
+  }
+  .session-time { width: 80px; color: var(--text2); flex-shrink: 0; font-weight: 500; }
+  .session-name { flex: 1; color: var(--text); font-family: var(--sans); font-size: 10px; }
+  .session-qual { margin-left: auto; display: flex; gap: 2px; }
+  .qual-dot { width: 6px; height: 6px; border-radius: 1px; }
+  .qual-filled { background: var(--green); }
+  .qual-empty { background: var(--border2); }
+
+  .session-row.hard-block { background: rgba(239,68,68,0.05); }
+  .session-row.hard-block .session-time { color: var(--red); }
+  .session-row.power { background: rgba(16,185,129,0.05); }
+
+  /* HARD RULES */
+  .rule-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    margin-bottom: 6px;
+    font-size: 9px;
+    line-height: 1.4;
+  }
+  .rule-row:last-child { margin-bottom: 0; }
+  .rule-n {
+    font-size: 9px;
+    font-weight: 600;
+    color: var(--red);
+    width: 16px;
+    flex-shrink: 0;
+  }
+  .rule-text { color: var(--text2); }
+  .rule-text code { color: var(--amber); font-family: var(--mono); }
+
+  /* FLOW ARROWS */
+  .arrow-down {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    margin: 2px 0;
+    color: var(--text3);
+    font-size: 14px;
+  }
+  .arrow-down::before { content: '↓'; }
+
+  /* DAY BIAS */
+  .bias-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 9px;
+    padding: 3px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .bias-row:last-child { border-bottom: none; }
+  .bias-cond { color: var(--text2); }
+  .bias-val { font-weight: 500; }
+  .bias-val.pos { color: var(--green); }
+  .bias-val.neg { color: var(--red); }
+
+  /* CVD */
+  .cvd-metric {
+    margin-bottom: 8px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  .cvd-metric:last-child { margin-bottom: 0; padding-bottom: 0; border-bottom: none; }
+  .cvd-metric-name {
+    font-size: 10px;
+    font-weight: 500;
+    color: var(--green);
+    font-family: var(--sans);
+    margin-bottom: 2px;
+  }
+  .cvd-metric-desc { font-size: 9px; color: var(--text2); line-height: 1.5; }
+  .cvd-metric-rule { font-size: 9px; color: var(--amber); margin-top: 2px; }
+
+  /* STATE */
+  .state-row {
+    display: grid;
+    grid-template-columns: 80px 1fr;
+    gap: 6px;
+    margin-bottom: 6px;
+    font-size: 9px;
+    align-items: flex-start;
+  }
+  .state-row:last-child { margin-bottom: 0; }
+  .state-scope {
+    font-size: 8px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text3);
+    padding: 2px 0;
+  }
+  .state-items { color: var(--text2); line-height: 1.6; }
+
+  /* FLOW LINES */
+  .flow-connector {
+    border-left: 2px dashed var(--border2);
+    margin-left: 20px;
+    padding-left: 12px;
+    padding-top: 4px;
+    padding-bottom: 4px;
+  }
+
+  /* PRINT */
+  @media print {
+    body { background: white; color: #111; padding: 16px; min-width: auto; }
+    :root {
+      --bg: #fff; --surface: #f8f9fa; --surface2: #f0f2f5;
+      --border: #dde1e7; --border2: #c8cdd6;
+      --text: #111; --text2: #444; --text3: #888;
+      --accent: #1a56db; --green: #047857;
+      --amber: #b45309; --red: #b91c1c;
+      --purple: #6d28d9; --teal: #0e7490;
+      --coral: #c2410c;
+    }
+    .section { break-inside: avoid; }
+  }
+
+  /* TWO-COLUMN LAYOUT for setups */
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .full-width { grid-column: 1 / -1; }
+
+  /* CONNECTOR LINE between main sections */
+  .pipe {
+    width: 2px;
+    background: var(--border2);
+    margin: 0 auto;
+    position: relative;
+  }
+  .pipe-label {
+    position: absolute;
+    left: 8px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 9px;
+    color: var(--text3);
+    white-space: nowrap;
+    letter-spacing: 0.06em;
+  }
+
+  /* CHIPS */
+  .chip {
+    display: inline-block;
+    font-size: 9px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    margin: 1px 2px;
+    font-weight: 500;
+    letter-spacing: 0.03em;
+  }
+  .chip-blue { background: rgba(59,130,246,0.15); color: var(--accent); }
+  .chip-green { background: rgba(16,185,129,0.15); color: var(--green); }
+  .chip-amber { background: rgba(245,158,11,0.15); color: var(--amber); }
+  .chip-red { background: rgba(239,68,68,0.15); color: var(--red); }
+  .chip-gray { background: rgba(100,100,120,0.15); color: var(--text2); }
+  .chip-teal { background: rgba(6,182,212,0.15); color: var(--teal); }
+
+  /* MAIN GRID */
+  .main-grid {
+    display: grid;
+    grid-template-columns: 220px 220px 1fr 220px;
+    gap: 16px;
+    align-items: start;
+  }
+  .col-title {
+    font-size: 9px;
+    font-weight: 600;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--text3);
+    margin-bottom: 10px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--border);
+  }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px;
+    margin-bottom: 12px;
+  }
+  .card:last-child { margin-bottom: 0; }
+  .card-title {
+    font-size: 11px;
+    font-weight: 600;
+    font-family: var(--sans);
+    color: var(--text);
+    margin-bottom: 10px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--border);
+  }
+  .card-title span {
+    font-size: 9px;
+    font-weight: 400;
+    color: var(--text3);
+    margin-left: 6px;
+    font-family: var(--mono);
+  }
+
+  hr.divider {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 12px 0;
+  }
+
+  .inline-kv {
+    display: flex;
+    justify-content: space-between;
+    font-size: 9px;
+    margin-bottom: 3px;
+  }
+  .inline-kv .k { color: var(--text3); }
+  .inline-kv .v { color: var(--text2); }
+  .inline-kv .v.em { color: var(--amber); }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>Options Signal Engine</h1>
+  <span class="version">V2.1 FINAL</span>
+  <div class="meta">
+    Manual execution · 8 assets · 2–5 DTE Rolling Fridays<br>
+    Finnhub WS + yfinance · $0/month data
+  </div>
+</div>
+
+<!-- LEGEND -->
+<div class="legend">
+  <div class="legend-item"><div class="legend-dot" style="background:var(--red)"></div> Hard halt / blocked</div>
+  <div class="legend-item"><div class="legend-dot" style="background:var(--accent)"></div> Data / gates</div>
+  <div class="legend-item"><div class="legend-dot" style="background:var(--purple)"></div> Approach context</div>
+  <div class="legend-item"><div class="legend-dot" style="background:var(--amber)"></div> Dynamic baselines (ATR/rolling avg)</div>
+  <div class="legend-item"><div class="legend-dot" style="background:var(--green)"></div> Confirmed signal / output</div>
+  <div class="legend-item"><div class="legend-dot" style="background:var(--teal)"></div> Computed metrics</div>
+  <div class="legend-item"><div class="legend-dot" style="background:var(--coral)"></div> Confidence scoring</div>
+</div>
+
+<!-- MAIN GRID -->
+<div class="main-grid">
+
+  <!-- COL 1: DATA SOURCES + STATE -->
+  <div>
+    <div class="col-title">Data Layer</div>
+
+    <div class="card">
+      <div class="card-title">Finnhub WebSocket <span>live ticks</span></div>
+      <div class="node-sub">8 assets × live ticks</div>
+      <div class="node-code">SPY QQQ AAPL NVDA TSLA MSFT META AMZN</div>
+      <hr class="divider">
+      <div class="inline-kv"><span class="k">VIX poll</span><span class="v">every 30s</span></div>
+      <div class="inline-kv"><span class="k">Eco calendar</span><span class="v">macro events</span></div>
+      <div class="inline-kv"><span class="k">WS stale detect</span><span class="v em">&gt;30s → halt</span></div>
+      <div class="inline-kv"><span class="k">Resync</span><span class="v">7-step protocol</span></div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">yfinance <span>bars + calendar</span></div>
+      <div class="inline-kv"><span class="k">1m bars</span><span class="v">cap 500</span></div>
+      <div class="inline-kv"><span class="k">5m bars</span><span class="v">cap 2000</span></div>
+      <div class="inline-kv"><span class="k">15m bars</span><span class="v">cap 1000</span></div>
+      <div class="inline-kv"><span class="k">Daily</span><span class="v">cap 252</span></div>
+      <div class="inline-kv"><span class="k">Earnings</span><span class="v">ticker.calendar</span></div>
+      <div class="inline-kv"><span class="k">Holidays</span><span class="v">2026 hardcoded</span></div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Computed Metrics</div>
+      <div class="inline-kv"><span class="k">CVD</span><span class="v em">asyncio.Lock/asset</span></div>
+      <div class="inline-kv"><span class="k">VWAP</span><span class="v">intraday reset</span></div>
+      <div class="inline-kv"><span class="k">ATR</span><span class="v">14-period</span></div>
+      <div class="inline-kv"><span class="k">Vol profile</span><span class="v">VAH/VAL/POC</span></div>
+      <div class="inline-kv"><span class="k">IV estimate</span><span class="v">VIX × beta</span></div>
+      <div class="inline-kv"><span class="k">OR high/low</span><span class="v">9:30–10:00</span></div>
+      <hr class="divider">
+      <div style="font-size:9px;color:var(--text3);margin-bottom:4px">Beta values</div>
+      <div class="node-code">SPY=1.0 QQQ=1.15 AAPL=1.2<br>NVDA=1.8 TSLA=2.0 MSFT=1.1<br>META=1.3 AMZN=1.2</div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">State Persistence <span>SQLite</span></div>
+      <div class="state-row">
+        <div class="state-scope">Hot mem</div>
+        <div class="state-items">Tick CVD, live candles, active detections</div>
+      </div>
+      <div class="state-row">
+        <div class="state-scope">60s flush</div>
+        <div class="state-items">CVD snapshots, day context</div>
+      </div>
+      <div class="state-row">
+        <div class="state-scope">5m flush</div>
+        <div class="state-items">Vol profile, LevelState, signal history, last tick ts</div>
+      </div>
+      <hr class="divider">
+      <div style="font-size:9px;color:var(--text3);margin-bottom:4px">WS Resync (7-step)</div>
+      <div class="node-code" style="line-height:1.7">
+        1. Detect stale (&gt;30s)<br>
+        2. Record gap_start / gap_end<br>
+        3. Fetch missing 1m from yfinance<br>
+        4. Reconstruct CVD → ESTIMATED flag<br>
+        5. Rebuild volume profile<br>
+        6. UNCERTAIN trackers → threshold=75<br>
+        7. Quarantine: MEDIUM only 2min
+      </div>
+    </div>
+  </div>
+
+  <!-- COL 2: GATES -->
+  <div>
+    <div class="col-title">Gate Sequence (0 → 8)</div>
+
+    <div class="card">
+      <div class="card-title">Pre-Signal Checks</div>
+      <div class="gate g-halt">
+        <div class="gate-num">0</div>
+        <div class="gate-body">
+          <div class="gate-name">Macro event halt</div>
+          <div class="gate-rule">FOMC/Fed: ±30min · CPI/NFP/PCE: ±15min</div>
+          <div class="gate-note">Hardcoded 2026 dates + Finnhub calendar backup</div>
+          <div class="gate-pass">FAIL → hard halt, no signal</div>
+        </div>
+      </div>
+      <div class="gate" style="border-color:rgba(239,68,68,0.2)">
+        <div class="gate-num" style="background:var(--red2);color:var(--red);border:1px solid var(--red)">E</div>
+        <div class="gate-body">
+          <div class="gate-name">Earnings check</div>
+          <div class="gate-rule">ticker.calendar — within hold period?</div>
+          <div class="gate-note">yfinance. SKIP if earnings overlap with max hold window.</div>
+        </div>
+      </div>
+      <div class="gate" style="border-color:rgba(239,68,68,0.2)">
+        <div class="gate-num" style="background:var(--red2);color:var(--red);border:1px solid var(--red)">H</div>
+        <div class="gate-body">
+          <div class="gate-name">Holiday check</div>
+          <div class="gate-rule">Market open today? Early close?</div>
+          <div class="gate-note">Early close days: cutoff 12:30 PM</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Core Gate Sequence</div>
+
+      <div class="gate g-location">
+        <div class="gate-num">1</div>
+        <div class="gate-body">
+          <div class="gate-name">Location</div>
+          <div class="gate-rule">abs(price − level) ≤ ATR × 0.3</div>
+          <div class="gate-note">Dynamic proximity. Solves TSLA/NVDA trap.</div>
+        </div>
+      </div>
+
+      <div class="gate g-approach">
+        <div class="gate-num">2</div>
+        <div class="gate-body">
+          <div class="gate-name">Approach context</div>
+          <div class="gate-rule">5-candle classifier → 5 types</div>
+          <div class="gate-note">Priority: AGGRESSIVE→ABSORPTION→EXHAUSTION→MOMENTUM→NEUTRAL</div>
+          <div class="gate-pass">NEUTRAL allowed: confidence −15pts</div>
+        </div>
+      </div>
+
+      <div class="gate g-vol">
+        <div class="gate-num">3</div>
+        <div class="gate-body">
+          <div class="gate-name">Volume signature</div>
+          <div class="gate-rule">vol ≥ 1.5 × rolling_avg(last_10_bars)</div>
+          <div class="gate-note">Solves U-curve bias. Setup 3A uses inverse: vol &lt; 0.8×.</div>
+        </div>
+      </div>
+
+      <div class="gate g-price">
+        <div class="gate-num">4</div>
+        <div class="gate-body">
+          <div class="gate-name">Price signature</div>
+          <div class="gate-rule">Consistent with approach context + setup</div>
+          <div class="gate-note">Displacement ratio, wick/body ratio, candle color</div>
+        </div>
+      </div>
+
+      <div class="gate g-cvd">
+        <div class="gate-num">5</div>
+        <div class="gate-body">
+          <div class="gate-name">CVD signature</div>
+          <div class="gate-rule">abs(cvd_turn) ≥ 2.0 × rolling_avg(last_10_cvd_turns)</div>
+          <div class="gate-note">OR CVD divergence present (+10 conf bonus). Solves order flow distortion.</div>
+          <div class="gate-pass">CVD quarantine: cap contribution at 8pts</div>
+        </div>
+      </div>
+
+      <div class="gate g-conf">
+        <div class="gate-num">6</div>
+        <div class="gate-body">
+          <div class="gate-name">Confidence score</div>
+          <div class="gate-rule">Score ≥ 50 → MEDIUM · Score ≥ 75 → HIGH</div>
+          <div class="gate-note">0–100 composite. NEUTRAL bias day: threshold raised to 70.</div>
+        </div>
+      </div>
+
+      <div class="gate g-confirm">
+        <div class="gate-num">7</div>
+        <div class="gate-body">
+          <div class="gate-name">Confirmation candle</div>
+          <div class="gate-rule">Next candle closes in signal direction</div>
+          <div class="gate-note">WAIT if not yet. Max 2 agent calls per tracker. Skip if super-candle.</div>
+          <div class="gate-pass">Super-candle: vol top 10% + body &gt; ATR + CVD &gt; 4×</div>
+        </div>
+      </div>
+
+      <div class="gate g-hard">
+        <div class="gate-num">8</div>
+        <div class="gate-body">
+          <div class="gate-name">Hard system rules</div>
+          <div class="gate-rule">VIX, session window, cooldowns, budget, trend align</div>
+          <div class="gate-note">10 rules — any single FAIL blocks signal</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- COL 3: SETUPS + APPROACH + CONFIDENCE -->
+  <div>
+    <div class="col-title">Detection Engine</div>
+
+    <!-- SETUPS -->
+    <div class="card">
+      <div class="card-title">Setups</div>
+      <div class="two-col">
+
+        <div class="setup s-liq">
+          <div class="setup-header">
+            <span class="setup-num">S1</span>
+            <span class="setup-name">Liquidity Grab</span>
+            <span class="setup-trigger">1m</span>
+          </div>
+          <div class="setup-body">
+            <div class="setup-row">
+              <div class="setup-key">approach</div>
+              <div class="setup-val"><span class="chip chip-red">Aggressive</span></div>
+            </div>
+            <div class="setup-row">
+              <div class="setup-key">session</div>
+              <div class="setup-val">Any (after 10:00)</div>
+            </div>
+            <div class="setup-row">
+              <div class="setup-key">trigger</div>
+              <div class="setup-val">Sweep candle: wick &gt; <code>0.3×ATR</code> past level, body closes back. Displacement ratio &gt; 0.6.</div>
+            </div>
+            <div class="setup-row">
+              <div class="setup-key">volume</div>
+              <div class="setup-val">Rank top 25%</div>
+            </div>
+            <div class="setup-row">
+              <div class="setup-key">CVD</div>
+              <div class="setup-val">Turn &gt; <code>2×avg</code></div>
+            </div>
+            <div class="setup-row">
+              <div class="setup-key">entry</div>
+              <div class="setup-val"><span class="hi">FVG midpoint</span> (preferred). If no FVG: next candle open.</div>
+            </div>
+            <div class="setup-row">
+              <div class="setup-key">FVG</div>
+              <div class="setup-val">Gap between candle[-3].high and candle[-1].low</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="setup s-def">
+          <div class="setup-header">
+            <span class="setup-num">S2</span>
+            <span class="setup-name">OB Defense</span>
+            <span class="setup-trigger">5m+1m</span>
+          </div>
+          <div class="setup-body">
+            <div class="setup-row">
+              <div class="setup-key">approach</div>
+              <div class="setup-val"><span class="chip chip-green">Absorption</span></div>
+            </div>
+            <div class="setup-row">
+              <div class="setup-key">session</div>
+              <div class="setup-val">After 10:00. TREND days only.</div>
+            </div>
+            <div class="setup-row">
+              <div class="setup-key">day bias</div>
+              <div class="setup-val">Bullish locked → LONG only</div>
+            </div>
+            <div class="setup-row">
+              <div class="setup-key">OB def</div>
+              <div class="setup-val">Last opposite-colored candle before displacement. Body &gt; <code>ATR×1.0</code>, vol top 20%.</div>
+            </div>
+            <div class="setup-row">
+              <div class="setup-key">OB valid</div>
+              <div class="setup-val">Formed within 60min. Not visited 2+ times since formed.</div>
+            </div>
+            <div class="setup-row">
+              <div class="setup-key">defense</div>
+              <div class="setup-val">candle.low touches OB zone (±0.15%). CVD slope: declining→flat/rising</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="setup s-fa">
+          <div class="setup-header">
+            <span class="setup-num">S3</span>
+            <span class="setup-name">Failed Auction</span>
+            <span class="setup-trigger">VAR + Major</span>
+          </div>
+          <div class="setup-body">
+            <div style="font-size:9px;font-weight:600;color:var(--amber);margin-bottom:5px;letter-spacing:0.05em">VERSION A — VAR</div>
+            <div class="setup-row">
+              <div class="setup-key">session</div>
+              <div class="setup-val">After 11:00 only</div>
+            </div>
+            <div class="setup-row">
+              <div class="setup-key">condition</div>
+              <div class="setup-val">Price outside VAH/VAL. Body closes back inside.</div>
+            </div>
+            <div class="setup-row">
+              <div class="setup-key">volume</div>
+              <div class="setup-val">vol &lt; <code>0.8×</code> rolling avg (low-vol confirm)</div>
+            </div>
+            <div class="setup-row">
+              <div class="setup-key">CVD</div>
+              <div class="setup-val">Turn &gt; <code>1.5×avg</code></div>
+            </div>
+            <div class="setup-row">
+              <div class="setup-key">target</div>
+              <div class="setup-val"><span class="hi">ALWAYS POC</span></div>
+            </div>
+            <hr class="divider">
+            <div style="font-size:9px;font-weight:600;color:var(--amber);margin-bottom:5px;letter-spacing:0.05em">VERSION B — MAJOR LEVEL</div>
+            <div class="setup-row">
+              <div class="setup-key">require</div>
+              <div class="setup-val">Level score ≥ 8. Exhaustion approach.</div>
+            </div>
+            <div class="setup-row">
+              <div class="setup-key">wick</div>
+              <div class="setup-val">wick/body &gt; 2.5. Vol top 25%.</div>
+            </div>
+            <div class="setup-row">
+              <div class="setup-key">CVD</div>
+              <div class="setup-val">Turn &gt; <code>2×avg</code></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="setup s-fb">
+          <div class="setup-header">
+            <span class="setup-num">S4</span>
+            <span class="setup-name">Failed Breakout</span>
+            <span class="setup-trigger">reversal</span>
+          </div>
+          <div class="setup-body">
+            <div class="setup-row">
+              <div class="setup-key">trigger</div>
+              <div class="setup-val">After S2 failure. Retest closes wrong side.</div>
+            </div>
+            <div class="setup-row">
+              <div class="setup-key">confirm</div>
+              <div class="setup-val">Next candle confirms direction + CVD &gt; <code>1.5×avg</code></div>
+            </div>
+            <div class="setup-row">
+              <div class="setup-key">direction</div>
+              <div class="setup-val">Opposite of original S2</div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- APPROACH CONTEXT -->
+    <div class="card">
+      <div class="card-title">Approach Context Classifier <span>5-candle window</span></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+
+        <div class="approach ap-agg">
+          <div class="approach-header">
+            <span class="approach-badge">Aggressive Push</span>
+            <span class="approach-priority">Priority 1</span>
+          </div>
+          <div class="approach-rule">
+            ≥1 of last 2 candles: <code>body &gt; ATR×1.0</code><br>
+            AND that candle vol <code>≥ 2.0× rolling_avg_10</code><br>
+            AND moving TOWARD level<br>
+            AND <code>abs(close[-1]−close[-3]) &gt; ATR×0.8</code>
+          </div>
+        </div>
+
+        <div class="approach ap-abs">
+          <div class="approach-header">
+            <span class="approach-badge">Absorption</span>
+            <span class="approach-priority">Priority 2</span>
+          </div>
+          <div class="approach-rule">
+            <code>max(high[-4:]) − min(low[-4:]) &lt; ATR×0.8</code><br>
+            ≥3 of last 4 bars: vol &gt; rolling_avg<br>
+            AND <code>avg_vol(last 4) &gt; 1.2× rolling_avg</code><br>
+            AND CVD flat or rising despite flat price
+          </div>
+        </div>
+
+        <div class="approach ap-exh">
+          <div class="approach-header">
+            <span class="approach-badge">Exhaustion</span>
+            <span class="approach-priority">Priority 3</span>
+          </div>
+          <div class="approach-rule">
+            <code>body[-1] &lt; body[-2] &lt; body[-3]</code><br>
+            AND all 3 bodies <code>&lt; ATR×0.4</code><br>
+            AND <code>avg_vol(last 3) ≤ avg_vol(−4 to −6)×1.1</code><br>
+            NO wick requirement (event candle, not approach)
+          </div>
+        </div>
+
+        <div class="approach ap-mom">
+          <div class="approach-header">
+            <span class="approach-badge">Momentum</span>
+            <span class="approach-priority">Priority 4</span>
+          </div>
+          <div class="approach-rule">
+            ≥4 of last 5: <code>close[i] &gt; close[i-1]</code><br>
+            AND each body <code>&gt; ATR×0.15</code> (no doji)<br>
+            AND total progress <code>abs(close[-1]−close[-5]) &gt; ATR×0.5</code>
+          </div>
+        </div>
+
+        <div class="approach ap-neu" style="grid-column:1/-1">
+          <div class="approach-header">
+            <span class="approach-badge">Neutral</span>
+            <span class="approach-priority">Default fallback</span>
+          </div>
+          <div class="approach-rule">
+            None of the above match. Detection not blocked. Confidence contribution = 0pts (max −15 from potential).
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- CONFIDENCE SCORING -->
+    <div class="card">
+      <div class="card-title">Confidence Scoring <span>0–100 composite</span></div>
+      <table class="score-table">
+        <tr>
+          <th>Component</th>
+          <th style="text-align:center;width:36px">Max</th>
+          <th>Key thresholds</th>
+        </tr>
+        <tr>
+          <td class="component">Location quality</td>
+          <td class="max">20</td>
+          <td>POC/VAH/VAL=20, PDH/PDL=15, ORH/ORL=10, weekly/monthly=18, confluence=+10 bonus</td>
+        </tr>
+        <tr>
+          <td class="component">Volume signature</td>
+          <td class="max">20</td>
+          <td>ratio≥2.0=20, ≥1.5=12, ≥1.2=5, &lt;1.2=0 (blocks)</td>
+        </tr>
+        <tr>
+          <td class="component">Price signature</td>
+          <td class="max">20</td>
+          <td>displacement&gt;1.0=20, 0.7–1.0=14, 0.4–0.7=8, wick&gt;0.5ATR=+5 bonus</td>
+        </tr>
+        <tr>
+          <td class="component">CVD signature</td>
+          <td class="max">25</td>
+          <td>turn&gt;4×=25, 2–4×=15, 1–2×=8, divergence=+10 bonus, flat=0. <span style="color:var(--red)">Quarantine cap: 8pts</span></td>
+        </tr>
+        <tr>
+          <td class="component">Approach context</td>
+          <td class="max">15</td>
+          <td>exhaustion/absorption=15, aggressive=12, momentum=10, neutral=0</td>
+        </tr>
+        <tr>
+          <td colspan="3">
+            <div style="margin-top:6px;font-size:9px;color:var(--text3)">Thresholds</div>
+            <div style="margin-top:4px">
+              <span class="chip chip-green">≥75 HIGH</span>
+              <span class="chip chip-amber">50–74 MEDIUM</span>
+              <span class="chip chip-red">&lt;50 NO SIGNAL</span>
+              <span class="chip chip-gray">NEUTRAL bias day: min 70</span>
+              <span class="chip chip-red">Quarantine max: 63</span>
+            </div>
+          </td>
+        </tr>
+      </table>
+    </div>
+
+    <!-- CVD METRICS -->
+    <div class="card">
+      <div class="card-title">CVD — 4 Metrics</div>
+      <div class="cvd-metric">
+        <div class="cvd-metric-name">1. Turn magnitude</div>
+        <div class="cvd-metric-desc">abs(cvd_event) / avg_abs_cvd_per_candle (rolling 10 bars)</div>
+        <div class="cvd-metric-rule">≥2× = required minimum · ≥4× = strongly institutional</div>
+      </div>
+      <div class="cvd-metric">
+        <div class="cvd-metric-name">2. Divergence</div>
+        <div class="cvd-metric-desc">Price new highs + CVD lower highs = distribution. Price new lows + CVD higher lows = accumulation.</div>
+        <div class="cvd-metric-rule">+10 confidence bonus when detected</div>
+      </div>
+      <div class="cvd-metric">
+        <div class="cvd-metric-name">3. Slope at level</div>
+        <div class="cvd-metric-desc">CVD declining before level → flattens/turns AT level = absorption moment</div>
+      </div>
+      <div class="cvd-metric">
+        <div class="cvd-metric-name">4. Sustained vs spike</div>
+        <div class="cvd-metric-desc">Turned and STAYED turned 2+ candles = real institutional positioning</div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- COL 4: OPTIONS + DAY CONTEXT + RULES + OUTPUT -->
+  <div>
+    <div class="col-title">Execution Layer</div>
+
+    <!-- OPTIONS MODEL -->
+    <div class="card">
+      <div class="card-title">2–5 DTE Rolling Fridays</div>
+      <div class="dte-row"><div class="dte-day">Mon</div><div class="dte-expiry">Current Friday</div></div>
+      <div class="dte-row"><div class="dte-day">Tue</div><div class="dte-expiry">Current Friday</div></div>
+      <div class="dte-row"><div class="dte-day">Wed</div><div class="dte-expiry">Current Friday</div></div>
+      <div class="dte-row"><div class="dte-day">Thu</div><div class="dte-expiry">Current Friday</div><div class="dte-note">before noon</div></div>
+      <div class="dte-row blocked"><div class="dte-day">Thu</div><div class="dte-expiry">SKIP</div><div class="dte-note">after 1:00 PM</div></div>
+      <div class="dte-row"><div class="dte-day">Fri</div><div class="dte-expiry">NEXT Friday</div><div class="dte-note">before noon</div></div>
+      <div class="dte-row blocked"><div class="dte-day">Fri</div><div class="dte-expiry">SKIP</div><div class="dte-note">after noon</div></div>
+      <hr class="divider">
+      <div class="inline-kv"><span class="k">Strike</span><span class="v em">ATM always</span></div>
+      <div class="inline-kv"><span class="k">IV est</span><span class="v">VIX × asset_beta</span></div>
+      <div class="inline-kv"><span class="k">VIX &gt;30</span><span class="v">debit spread only</span></div>
+      <div class="inline-kv"><span class="k">VIX ≥35</span><span class="v em">hard block</span></div>
+      <div class="inline-kv"><span class="k">Max hold</span><span class="v">5 trading days</span></div>
+      <div class="inline-kv"><span class="k">Exit by</span><span class="v">Day 3 if TP1 not hit</span></div>
+      <hr class="divider">
+      <div style="font-size:9px;color:var(--text3);margin-bottom:4px">Spread check rule</div>
+      <div class="node-code">ask ≤ est_premium + $0.20 → buy<br>ask &gt; est_premium + $0.20 → skip<br>price drift &gt;0.5% from signal → skip</div>
+    </div>
+
+    <!-- SESSION WINDOWS -->
+    <div class="card">
+      <div class="card-title">Session Quality Gates</div>
+      <div class="session-row hard-block">
+        <div class="session-time">9:30–10:00</div>
+        <div class="session-name">Hard block</div>
+        <div class="session-qual">
+          <div class="qual-dot qual-empty"></div><div class="qual-dot qual-empty"></div><div class="qual-dot qual-empty"></div><div class="qual-dot qual-empty"></div><div class="qual-dot qual-empty"></div>
+        </div>
+      </div>
+      <div class="session-row power">
+        <div class="session-time">10:00–11:00</div>
+        <div class="session-name">Power hour</div>
+        <div class="session-qual">
+          <div class="qual-dot qual-filled"></div><div class="qual-dot qual-filled"></div><div class="qual-dot qual-filled"></div><div class="qual-dot qual-filled"></div><div class="qual-dot qual-filled"></div>
+        </div>
+      </div>
+      <div class="session-row">
+        <div class="session-time">11:00–12:00</div>
+        <div class="session-name">Mid morning</div>
+        <div class="session-qual">
+          <div class="qual-dot qual-filled"></div><div class="qual-dot qual-filled"></div><div class="qual-dot qual-filled"></div><div class="qual-dot qual-filled"></div><div class="qual-dot qual-empty"></div>
+        </div>
+      </div>
+      <div class="session-row">
+        <div class="session-time">12:00–14:00</div>
+        <div class="session-name">Dead zone</div>
+        <div class="session-qual">
+          <div class="qual-dot qual-filled"></div><div class="qual-dot qual-empty"></div><div class="qual-dot qual-empty"></div><div class="qual-dot qual-empty"></div><div class="qual-dot qual-empty"></div>
+        </div>
+      </div>
+      <div class="session-row power">
+        <div class="session-time">14:00–15:15</div>
+        <div class="session-name">Afternoon</div>
+        <div class="session-qual">
+          <div class="qual-dot qual-filled"></div><div class="qual-dot qual-filled"></div><div class="qual-dot qual-filled"></div><div class="qual-dot qual-filled"></div><div class="qual-dot qual-empty"></div>
+        </div>
+      </div>
+      <div class="session-row">
+        <div class="session-time">15:15–15:30</div>
+        <div class="session-name">Power close</div>
+        <div class="session-qual">
+          <div class="qual-dot qual-filled"></div><div class="qual-dot qual-filled"></div><div class="qual-dot qual-empty"></div><div class="qual-dot qual-empty"></div><div class="qual-dot qual-empty"></div>
+        </div>
+      </div>
+      <div class="session-row hard-block">
+        <div class="session-time">15:30+</div>
+        <div class="session-name">Hard cutoff</div>
+        <div class="session-qual">
+          <div class="qual-dot qual-empty"></div><div class="qual-dot qual-empty"></div><div class="qual-dot qual-empty"></div><div class="qual-dot qual-empty"></div><div class="qual-dot qual-empty"></div>
+        </div>
+      </div>
+      <div style="font-size:9px;color:var(--text3);margin-top:6px">Dead zone: score ≥8 only, no VAR. Power close: score ≥9 only.</div>
+    </div>
+
+    <!-- DAY BIAS -->
+    <div class="card">
+      <div class="card-title">Day Bias <span>locked at 10:00 AM</span></div>
+      <div style="font-size:9px;color:var(--text3);margin-bottom:6px">Day type (direction changes in last 30 OR bars)</div>
+      <div class="inline-kv"><span class="k">≤4 changes</span><span class="v em">TREND DAY → S2 valid</span></div>
+      <div class="inline-kv"><span class="k">5–9 changes</span><span class="v">RANGE DAY</span></div>
+      <div class="inline-kv"><span class="k">≥10 changes</span><span class="v">RANGE DAY</span></div>
+      <hr class="divider">
+      <div style="font-size:9px;color:var(--text3);margin-bottom:6px">Directional bias score</div>
+      <div class="bias-row"><div class="bias-cond">Daily trend bullish</div><div class="bias-val pos">+1</div></div>
+      <div class="bias-row"><div class="bias-cond">15m trend bullish</div><div class="bias-val pos">+1</div></div>
+      <div class="bias-row"><div class="bias-cond">Broke above ORH</div><div class="bias-val pos">+2</div></div>
+      <div class="bias-row"><div class="bias-cond">Price above VWAP</div><div class="bias-val pos">+1</div></div>
+      <div class="bias-row"><div class="bias-cond">Broke below ORL</div><div class="bias-val neg">−2</div></div>
+      <div class="bias-row"><div class="bias-cond">Price below VWAP</div><div class="bias-val neg">−1</div></div>
+      <hr class="divider">
+      <div class="inline-kv"><span class="k">≥+3</span><span class="v" style="color:var(--green)">BULLISH locked → LONG only</span></div>
+      <div class="inline-kv"><span class="k">≤−3</span><span class="v" style="color:var(--red)">BEARISH locked → SHORT only</span></div>
+      <div class="inline-kv"><span class="k">−2 to +2</span><span class="v">NEUTRAL · both · threshold 70</span></div>
+      <div style="font-size:9px;color:var(--text3);margin-top:4px">Override: level score ≥9 → counter-bias allowed</div>
+    </div>
+
+    <!-- LEVEL SYSTEM -->
+    <div class="card">
+      <div class="card-title">Level System</div>
+      <div class="inline-kv"><span class="k">Min score</span><span class="v em">≥7 (required)</span></div>
+      <div class="inline-kv"><span class="k">Target per asset</span><span class="v">6–8 levels</span></div>
+      <div class="inline-kv"><span class="k">Confluence</span><span class="v">within 0.30% → max+2 (cap 12)</span></div>
+      <hr class="divider">
+      <div style="font-size:9px;color:var(--text3);margin-bottom:4px">Volume interaction multiplier</div>
+      <div class="inline-kv"><span class="k">0 interactions</span><span class="v">×0.5</span></div>
+      <div class="inline-kv"><span class="k">1 interaction</span><span class="v">×1.0</span></div>
+      <div class="inline-kv"><span class="k">2 interactions</span><span class="v">×1.3</span></div>
+      <div class="inline-kv"><span class="k">3+ interactions</span><span class="v em">×1.5</span></div>
+    </div>
+
+    <!-- HARD RULES -->
+    <div class="card">
+      <div class="card-title">10 Hard Rules</div>
+      <div class="rule-row"><span class="rule-n">1</span><span class="rule-text">No signals before <code>10:00 AM ET</code></span></div>
+      <div class="rule-row"><span class="rule-n">2</span><span class="rule-text">No signals after <code>3:15 PM ET</code></span></div>
+      <div class="rule-row"><span class="rule-n">3</span><span class="rule-text">No signals during Tier-1 macro events</span></div>
+      <div class="rule-row"><span class="rule-n">4</span><span class="rule-text">No signals if earnings within hold period</span></div>
+      <div class="rule-row"><span class="rule-n">5</span><span class="rule-text">No signals when <code>VIX ≥ 35</code></span></div>
+      <div class="rule-row"><span class="rule-n">6</span><span class="rule-text">No counter-trend (unless level score ≥9)</span></div>
+      <div class="rule-row"><span class="rule-n">7</span><span class="rule-text">No duplicate signals same level same day</span></div>
+      <div class="rule-row"><span class="rule-n">8</span><span class="rule-text">Max 3 signals per asset per day</span></div>
+      <div class="rule-row"><span class="rule-n">9</span><span class="rule-text">Minimum RR <code>2.5:1</code></span></div>
+      <div class="rule-row"><span class="rule-n">10</span><span class="rule-text">One agent at a time (<code>asyncio.Lock</code>)</span></div>
+    </div>
+
+    <!-- SIGNAL OUTPUT -->
+    <div class="card">
+      <div class="card-title">Signal Output → Telegram</div>
+      <div class="signal-box">
+        <div class="signal-header">Confirmed signal brief</div>
+        <div class="signal-field"><span class="k">Asset + direction</span><span class="v hi">NVDA LONG</span></div>
+        <div class="signal-field"><span class="k">Setup type</span><span class="v">S1 Liquidity Grab</span></div>
+        <div class="signal-field"><span class="k">Level</span><span class="v">PDH $875.40 (score 9)</span></div>
+        <div class="signal-field"><span class="k">Entry</span><span class="v hi">$875.20 (FVG mid)</span></div>
+        <div class="signal-field"><span class="k">Contract</span><span class="v">875C Fri expiry</span></div>
+        <div class="signal-field"><span class="k">IV estimate</span><span class="v">~38% (approx)</span></div>
+        <div class="signal-field"><span class="k">Confidence</span><span class="v hi">82 HIGH</span></div>
+        <div class="signal-field"><span class="k">Session</span><span class="v">Power Hour 5/5</span></div>
+        <div class="signal-field"><span class="k">Day bias</span><span class="v">BULLISH (+4)</span></div>
+        <div class="signal-field"><span class="k">Spread check</span><span class="v">ask ≤ est + $0.20</span></div>
+        <div class="signal-field"><span class="k">TP1 / TP2 / SL</span><span class="v">auto-computed 2.5:1</span></div>
+        <div class="signal-field"><span class="k">Max hold</span><span class="v">Day 3 exit</span></div>
+      </div>
+      <div style="font-size:9px;color:var(--text3)">WAIT signal: no Telegram. Tracker continues. Max 2 agent calls per tracker.</div>
+    </div>
+
+  </div>
+</div>
+
+<!-- FILE MAP -->
+<div style="margin-top:32px;border-top:1px solid var(--border);padding-top:24px">
+  <div class="col-title" style="margin-bottom:16px">Module File Map — v2.1 Build Targets</div>
+  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px">
+
+    <div class="card" style="margin-bottom:0">
+      <div class="card-title" style="color:var(--accent)">New files</div>
+      <div class="node-code" style="line-height:2">
+        detection/liquidity_grab.py<br>
+        detection/defense.py<br>
+        detection/failed_auction.py<br>
+        detection/approach.py<br>
+        detection/metrics.py<br>
+        detection/confidence.py<br>
+        data/persistence.py<br>
+        data/calendar.py
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:0">
+      <div class="card-title" style="color:var(--amber)">Modify — detection</div>
+      <div class="node-code" style="line-height:2">
+        detection/failed_breakout.py<br>
+        detection/level_state.py<br>
+        <span style="color:var(--text3)">→ UNCERTAIN state</span><br>
+        <span style="color:var(--text3)">→ safe iteration</span><br>
+        <span style="color:var(--text3)">→ WAIT tracker logic</span><br>
+        levels/builder.py<br>
+        <span style="color:var(--text3)">→ vol confirm multi</span><br>
+        <span style="color:var(--text3)">→ score ≥7 threshold</span>
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:0">
+      <div class="card-title" style="color:var(--amber)">Modify — core / context</div>
+      <div class="node-code" style="line-height:2">
+        core/multi_engine.py<br>
+        <span style="color:var(--text3)">→ route new setups</span><br>
+        <span style="color:var(--text3)">→ asyncio.Lock</span><br>
+        core/gates.py<br>
+        <span style="color:var(--text3)">→ Gate 0, earnings</span><br>
+        <span style="color:var(--text3)">→ ATR×0.3 proximity</span><br>
+        context/options_context.py<br>
+        context/day_context.py
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:0">
+      <div class="card-title" style="color:var(--amber)">Modify — agent / data</div>
+      <div class="node-code" style="line-height:2">
+        agent/agent.py<br>
+        <span style="color:var(--text3)">→ asyncio.Lock</span><br>
+        agent/brief.py<br>
+        <span style="color:var(--text3)">→ macro, earnings, IV</span><br>
+        agent/tools.py<br>
+        <span style="color:var(--text3)">→ 2000 char truncation</span><br>
+        data/cvd_engine.py<br>
+        data/candle_store.py
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<div style="margin-top:24px;font-size:9px;color:var(--text3);display:flex;justify-content:space-between;border-top:1px solid var(--border);padding-top:12px">
+  <span>Options Signal Engine v2.1 — Design locked. Manual execution. $0/month data.</span>
+  <span>Philosophy: "Are institutions actively positioning at this price level right now?"</span>
+</div>
+
+</body>
+</html>

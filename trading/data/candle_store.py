@@ -35,6 +35,8 @@ class AssetCandleStore:
         self._pending_15m_fire: bool = False
         # Health
         self._health = DataHealth(asset=asset)
+        # Simulation replay data (set by run_simulation)
+        self._sim_replay: list[Candle] = []
 
     # ── Properties: c5m / c15m with fallback ──────────────────────
 

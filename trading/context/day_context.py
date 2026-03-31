@@ -5,10 +5,114 @@ from ..models import Candle, DayContext
 ET = pytz.timezone("America/New_York")
 
 
+def compute_day_bias(
+    daily_bars: list,
+    bars_15m: list,
+    current_price: float,
+    or_high: float,
+    or_low: float,
+    vwap: float,
+) -> tuple:
+    """
+    Returns (bias: str, score: int).
+    bias: BULLISH | BEARISH | NEUTRAL
+    score: integer
+    Locked at 10:00 AM.
+    """
+    score = 0
+
+    # Daily trend
+    if len(daily_bars) >= 5:
+        last5 = daily_bars[-5:]
+        if last5[-1].c > last5[0].c:
+            score += 1
+        elif last5[-1].c < last5[0].c:
+            score -= 1
+
+    # 15m trend
+    if len(bars_15m) >= 4:
+        last4 = bars_15m[-4:]
+        if last4[-1].c > last4[0].c:
+            score += 1
+        elif last4[-1].c < last4[0].c:
+            score -= 1
+
+    # Broke above ORH or below ORL
+    if or_high > 0 and current_price > or_high:
+        score += 2
+    elif or_low > 0 and current_price < or_low:
+        score -= 2
+
+    # Price vs VWAP
+    if vwap > 0:
+        if current_price > vwap:
+            score += 1
+        elif current_price < vwap:
+            score -= 1
+
+    if score >= 3:
+        bias = "BULLISH"
+    elif score <= -3:
+        bias = "BEARISH"
+    else:
+        bias = "NEUTRAL"
+
+    return bias, score
+
+
+def compute_day_type(
+    bars_1m_today: list,
+    atr: float = 0.0,
+    current_price: float = 0.0,
+    pd_vah: float = 0.0,
+    pd_val: float = 0.0,
+    vwap: float = 0.0,
+) -> str:
+    """V3.2: TREND | RANGE — Displacement + Institutional Value filter.
+
+    Two-factor authentication:
+    1. ATR Displacement: net move over last 30 bars must exceed ATR × 1.5
+    2. Institutional Value: price must be outside pdVAH/pdVAL (or above/below VWAP as fallback)
+
+    Both must pass → TREND. Otherwise → RANGE.
+    """
+    if len(bars_1m_today) < 10:
+        return "RANGE"
+
+    # ── Factor 1: ATR Displacement Check ──
+    sample = bars_1m_today[-30:]
+    if atr <= 0:
+        # Fallback: compute ATR from sample if not provided
+        trs = [max(c.h - c.l, abs(c.h - sample[i-1].c), abs(c.l - sample[i-1].c))
+               for i, c in enumerate(sample) if i > 0]
+        atr = sum(trs) / len(trs) if trs else 0.001
+
+    net_displacement = abs(sample[-1].c - sample[0].c)
+    if net_displacement <= atr * 1.5:
+        return "RANGE"
+
+    # ── Factor 2: Institutional Value Filter ──
+    price = current_price or sample[-1].c
+
+    if pd_vah > 0 and pd_val > 0:
+        # Primary: price must be outside prior day value area
+        outside_value = price > pd_vah or price < pd_val
+    elif vwap > 0:
+        # Fallback: price clearly holding one side of VWAP
+        # "Clearly" = at least 0.1% away from VWAP to avoid noise
+        vwap_margin = vwap * 0.001
+        outside_value = price > (vwap + vwap_margin) or price < (vwap - vwap_margin)
+    else:
+        return "RANGE"
+
+    return "TREND" if outside_value else "RANGE"
+
+
 def assess_day_context(
     asset: str, daily_bars: list[Candle], bars_15m: list[Candle],
     bars_1m_today: list[Candle], or_high: float, or_low: float,
     current_price: float, benchmark_price: float = 0.0, benchmark_prev: float = 0.0,
+    atr: float = 0.0, pd_vah: float = 0.0, pd_val: float = 0.0, vwap: float = 0.0,
 ) -> DayContext:
     gap_pct, gap_type, gap_filled = 0.0, "FLAT", False
     if len(daily_bars) >= 1 and bars_1m_today:
@@ -21,11 +125,10 @@ def assess_day_context(
             if gap_type == "GAP_UP": gap_filled = current_price <= prev_close
             elif gap_type == "GAP_DOWN": gap_filled = current_price >= prev_close
 
-    day_type = "RANGE"
-    if len(bars_1m_today) >= 10:
-        changes = sum(1 for i in range(1, min(30, len(bars_1m_today)))
-                      if (bars_1m_today[i-1].c > bars_1m_today[i-1].o) != (bars_1m_today[i].c > bars_1m_today[i].o))
-        day_type = "TREND" if changes <= 4 else "RANGE"
+    day_type = compute_day_type(
+        bars_1m_today, atr=atr, current_price=current_price,
+        pd_vah=pd_vah, pd_val=pd_val, vwap=vwap,
+    )
 
     bias_points = 0
     if len(daily_bars) >= 5:

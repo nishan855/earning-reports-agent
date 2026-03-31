@@ -78,6 +78,11 @@ class TrackerEngine:
         # CVD check removed — CVD mean-reverts naturally during pullbacks.
         # The LLM agent evaluates CVD quality. Mechanical system confirms structure only.
 
+        # When uncertain (WS resync mid-track), raise confirmation bar
+        if tracker.uncertain:
+            # Require stronger volume confirmation when data quality is uncertain
+            proximity = proximity * 0.75  # tighter proximity requirement
+
         if direction == "BULLISH":
             if candle.l > level + proximity:
                 return "WATCHING"  # hasn't retested yet
@@ -116,7 +121,7 @@ class TrackerEngine:
         return self._key(asset, level_name) in self._locked
 
     def active_for_asset(self, asset: str) -> list[LevelState]:
-        return [t for t in self._trackers.values()
+        return [t for t in list(self._trackers.values())
                 if t.asset == asset and t.status == TrackerStatus.WATCHING.value]
 
     def reset_daily(self):

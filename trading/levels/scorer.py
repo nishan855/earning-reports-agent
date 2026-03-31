@@ -4,7 +4,7 @@ from ..constants import CONFLUENCE_BOOST, MIN_LEVEL_SCORE
 # Source priority for tiebreaking when two levels have the same score
 # Higher = more institutional significance, wins the dedup
 SOURCE_PRIORITY = {
-    "52W": 10, "MONTHLY": 9, "WEEKLY": 8, "PD": 7, "OR": 6,
+    "52W": 10, "MONTHLY": 9, "PD_VOLUME": 8, "WEEKLY": 8, "PD": 7, "OR": 6,
     "ZONE": 5, "VOLUME": 4, "PM": 3, "VWAP": 2,
 }
 
