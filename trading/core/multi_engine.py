@@ -3,7 +3,7 @@ import time
 import pytz
 from datetime import datetime
 
-from ..constants import ASSETS, BACKFILL_MAX_GAP_SEC, HEALTH_STALE_SEC, HEALTH_DEGRADED_BARS
+from ..constants import ASSETS, BACKFILL_MAX_GAP_SEC, HEALTH_STALE_SEC, HEALTH_DEGRADED_BARS, MIN_LEVEL_SCORE
 from ..models import Candle, Level, DayContext, DataHealth
 from ..context.sim_clock import now_et, set_sim_time
 from ..core.gates import GateSystem
@@ -11,13 +11,14 @@ from ..data.candle_store import MultiCandleStore
 from ..data.cvd_engine import MultiCVDEngine
 from ..data.data_feed import DataFeed
 from ..levels.builder import build_levels, calc_vwap, filter_today_bars
+from ..levels.volume_profile import compute_prior_day_profile
 from ..levels.volume_profile import compute_volume_profile
 from ..levels.zones import detect_zones
 from ..detection.level_state import TrackerEngine
-from ..detection.breakout import detect_breakout, is_back_through
-from ..detection.rejection import detect_rejection
-from ..detection.stop_hunt import detect_stop_hunt, confirm_stop_hunt
-from ..detection.failed_breakout import detect_failed_retest, confirm_failed_breakout, get_reverse_direction
+from ..detection.liquidity_grab import detect_liquidity_grab
+from ..detection.defense import detect_ob_defense
+from ..detection.approach import classify_approach
+from ..detection.metrics import is_super_candle
 from ..context.session import get_current_session, is_trading_hours, is_or_complete, minutes_to_cutoff
 from ..context.day_context import assess_day_context
 from ..agent.tools import ToolHandler
@@ -46,13 +47,11 @@ class MultiEngine:
         self._or_low: dict = {a: 0.0 for a in ASSETS}
         self._or_locked: dict = {a: False for a in ASSETS}
         self._investigating: dict = {a: False for a in ASSETS}
-        self._pending_stop_hunts: dict = {}
-        self._locked_stop_hunt_levels: dict = {a: set() for a in ASSETS}
-        self._pending_rejections: dict = {}
-        self._locked_rejection_levels: dict = {a: set() for a in ASSETS}
         self._last_tick_time: dict = {a: 0.0 for a in ASSETS}
         self._tracker = TrackerEngine()
         self._gates = GateSystem()
+        self._agent_lock = asyncio.Lock()
+        self._last_tick_ts: dict = {a: 0.0 for a in ASSETS}  # seconds
         if self._sim_mode:
             self._gates.sim_mode = True
         self._on_signal = on_signal
@@ -63,6 +62,8 @@ class MultiEngine:
         # Data health per asset
         self._health: dict[str, DataHealth] = {a: DataHealth(asset=a) for a in ASSETS}
         self._ws_disconnect_count: int = 0
+        self._last_vwap: dict = {}
+        self._prior_day_vp: dict = {}  # V3.1: prior day volume profile per asset
         # Register 1m/5m close callbacks on candle store
         for asset in ASSETS:
             self._candles.on_1m_close(asset, self.on_1m_close)
@@ -70,12 +71,38 @@ class MultiEngine:
 
     async def start(self):
         self._log("MultiEngine starting — 8 assets")
-        if not self._sim_mode:
+        if self._sim_mode:
+            await self._preload_prior_day_bars()
+        else:
             self._candles.start_heartbeat()
         await asyncio.gather(
             self._feed.start(),
             self._broadcast_state_loop(),
         )
+
+    async def _preload_prior_day_bars(self):
+        """Pre-load prior day 1m bars from yfinance so prior day VP works in sim mode."""
+        import yfinance as yf
+        self._log("Loading prior day 1m bars for V3.1 volume profile...")
+        for asset in ASSETS:
+            try:
+                ticker = yf.Ticker(asset)
+                df = await asyncio.to_thread(lambda: ticker.history(period="5d", interval="1m"))
+                if df.empty:
+                    continue
+                bars = []
+                for ts, row in df.iterrows():
+                    lo = float(row["Low"])
+                    o, h, c, v = float(row["Open"]), float(row["High"]), float(row["Close"]), float(row["Volume"])
+                    if c > 0 and h >= lo:
+                        bars.append(Candle(t=int(ts.timestamp() * 1000), o=round(o, 2), h=round(h, 2),
+                                           l=round(lo, 2), c=round(c, 2), v=v))
+                if bars:
+                    store = self._candles.get(asset)
+                    store.closed_1m = bars  # seed with multi-day history
+                    self._log(f"{asset}: pre-loaded {len(bars)} 1m bars for prior day VP")
+            except Exception as e:
+                self._log(f"{asset}: prior day load failed — {e}", "error")
 
     async def start_simulation(self):
         """Start in simulation mode — replay historical data, skip live feed."""
@@ -103,9 +130,10 @@ class MultiEngine:
 
                 def to_candles(df):
                     out = []
-                    for ts, row in df.iterrows():
+                    for idx, row in df.iterrows():
                         try:
-                            c = Candle(t=int(ts.timestamp()*1000), o=round(float(row["Open"]),2),
+                            ts_ms = int(idx.timestamp() * 1000) if hasattr(idx, 'timestamp') else 0  # type: ignore[union-attr]
+                            c = Candle(t=ts_ms, o=round(float(row["Open"]),2),
                                        h=round(float(row["High"]),2), l=round(float(row["Low"]),2),
                                        c=round(float(row["Close"]),2), v=float(row["Volume"]))
                             if c.c > 0 and c.h >= c.l:
@@ -154,12 +182,12 @@ class MultiEngine:
 
         # Replay each candle through the engine
         self._log("SIMULATION: Starting replay...")
-        max_bars = max(len(self._candles.get(a)._sim_replay) for a in ASSETS if hasattr(self._candles.get(a), '_sim_replay'))
+        max_bars = max(len(self._candles.get(a)._sim_replay) for a in ASSETS)
 
         for i in range(max_bars):
             for asset in ASSETS:
                 store = self._candles.get(asset)
-                replay = getattr(store, '_sim_replay', [])
+                replay = store._sim_replay
                 if i >= len(replay):
                     continue
                 bar = replay[i]
@@ -202,7 +230,7 @@ class MultiEngine:
             # Run detection on each 1m close
             for asset in ASSETS:
                 store = self._candles.get(asset)
-                replay = getattr(store, '_sim_replay', [])
+                replay = store._sim_replay
                 if i >= len(replay):
                     continue
                 bar = replay[i]
@@ -244,45 +272,96 @@ class MultiEngine:
                             avg_5m = self._avg_vol(asset, "5m")
                             cvd_val = cvd_eng.value
 
+                            # S3A: Value Area Rejection (OUTSIDE level loop)
+                            # V3.1: Check both prior day VP and developing VP
+                            vp = self._vol_profiles.get(asset)
+                            pdvp = self._prior_day_vp.get(asset)
+                            sim_hour = et.hour + et.minute / 60.0
+                            s3a_sim_checks = []
+                            if pdvp and pdvp.vah and pdvp.val and pdvp.poc:
+                                s3a_sim_checks.append((pdvp.vah, pdvp.val, pdvp.poc, Level(name="pdVAH", price=pdvp.vah, score=9, type="resistance", source="PD_VOLUME", confidence="HIGH"), "prior day"))
+                            if vp and vp.vah and vp.val and vp.poc:
+                                s3a_sim_checks.append((vp.vah, vp.val, vp.poc, Level(name="dVAH", price=vp.vah, score=7, type="resistance", source="VOLUME", confidence="HIGH"), "developing"))
+
+                            if not self._investigating[asset] and s3a_sim_checks and sim_hour >= 11.0:
+                                from ..detection.failed_auction import _detect_var
+                                for s_vah, s_val, s_poc, var_level, vp_lbl in s3a_sim_checks:
+                                    if self._investigating[asset]:
+                                        break
+                                    try:
+                                        result = _detect_var(
+                                            store.closed_5m, var_level, atr, avg_5m, cvd_val, 1.0,
+                                            s_vah, s_val, s_poc, sim_hour, False, bias,
+                                        )
+                                        if result:
+                                            fa_dir = result.get("direction", "NEUTRAL")
+                                            vol_ratio = c5_last.v / avg_5m if avg_5m > 0 else 1.0
+                                            passed, _ = self._gates.check_all(asset, var_level.score, vol_ratio, self._vix, fa_dir, bias)
+                                            if passed:
+                                                self._log(f"SIM DETECT: {asset} FAILED_AUCTION_VAR {fa_dir} at {vp_lbl} VAH/VAL")
+                                                await self._fire_agent(asset, "FAILED_AUCTION_VAR", fa_dir, var_level, c5_last, vol_ratio, cvd_val)
+                                                break
+                                    except Exception:
+                                        pass
+
+                            # Level loop: S2 (OB Defense) + S3B (Major Level Rejection)
                             for level in self._levels[asset]:
-                                if level.score < 6 or self._investigating[asset]:
+                                if level.score < MIN_LEVEL_SCORE or self._investigating[asset]:
                                     continue
+                                # Setup 2: OB Defense
                                 try:
-                                    is_bo, bo_dir = detect_breakout(c5_last, c5_prev, level, avg_5m, 0, cvd_val, atr)
-                                    if is_bo:
+                                    dc = self._day_contexts.get(asset)
+                                    sim_day_type = dc.day_type if dc else "RANGE"
+                                    result = detect_ob_defense(
+                                        store.closed_5m, store.closed_1m, level, atr, avg_5m,
+                                        self._avg_vol(asset, "1m"), cvd_val, 1.0, sim_day_type, bias,
+                                    )
+                                    if result:
+                                        ob_dir = result.get("direction", "NEUTRAL")
                                         vol_ratio = c5_last.v / avg_5m if avg_5m > 0 else 1.0
-                                        passed, _ = self._gates.check_all(asset, level.score, vol_ratio, self._vix, bo_dir, bias)
+                                        passed, _ = self._gates.check_all(asset, level.score, vol_ratio, self._vix, ob_dir, bias)
                                         if passed:
-                                            self._log(f"SIM DETECT: {asset} BREAKOUT {bo_dir} at {level.name} ${level.price:.2f}")
-                                            await self._fire_agent(asset, "BREAKOUT_RETEST", bo_dir, level, c5_last, vol_ratio, cvd_val)
+                                            self._log(f"SIM DETECT: {asset} OB_DEFENSE {ob_dir} at {level.name} ${level.price:.2f}")
+                                            await self._fire_agent(asset, "OB_DEFENSE", ob_dir, level, c5_last, vol_ratio, cvd_val)
                                             break
                                 except Exception:
                                     pass
+                                # Setup 3B: Major Level Rejection only (S3A handled above)
                                 try:
-                                    is_rej, rej_dir, _ = detect_rejection(c5_last, level, avg_5m, 0, cvd_val, atr)
-                                    if is_rej and level.score >= 8:
-                                        vol_ratio = c5_last.v / avg_5m if avg_5m > 0 else 1.0
-                                        passed, _ = self._gates.check_all(asset, level.score, vol_ratio, self._vix, rej_dir, bias)
-                                        if passed:
-                                            self._log(f"SIM DETECT: {asset} REJECTION {rej_dir} at {level.name} ${level.price:.2f}")
-                                            await self._fire_agent(asset, "REJECTION", rej_dir, level, c5_last, vol_ratio, cvd_val)
-                                            break
+                                    if level.score >= 8:
+                                        from ..detection.failed_auction import _detect_major_level
+                                        result = _detect_major_level(
+                                            store.closed_5m, level, atr, avg_5m,
+                                            cvd_val, 1.0, False, bias,
+                                            candles_1m=store.closed_1m[-10:],
+                                        )
+                                        if result:
+                                            fa_dir = result.get("direction", "NEUTRAL")
+                                            vol_ratio = c5_last.v / avg_5m if avg_5m > 0 else 1.0
+                                            passed, _ = self._gates.check_all(asset, level.score, vol_ratio, self._vix, fa_dir, bias)
+                                            if passed:
+                                                self._log(f"SIM DETECT: {asset} FAILED_AUCTION_MAJOR {fa_dir} at {level.name} ${level.price:.2f}")
+                                                await self._fire_agent(asset, "FAILED_AUCTION_MAJOR", fa_dir, level, c5_last, vol_ratio, cvd_val)
+                                                break
                                 except Exception:
                                     pass
 
-                        # 1m detection (stop hunt)
+                        # 1m detection (liquidity grab)
                         for level in self._levels[asset]:
-                            if level.score < 6 or self._investigating[asset]:
+                            if level.score < MIN_LEVEL_SCORE or self._investigating[asset]:
                                 continue
                             try:
                                 cvd_change = cvd_eng.value - (cvd_eng.value_1min_ago if cvd_eng._history else 0)
-                                is_hunt, hunt_dir = detect_stop_hunt(last, level, avg_vol, cvd_change, atr)
-                                if is_hunt:
+                                result = detect_liquidity_grab(
+                                    bars_so_far[-10:], level, atr, avg_vol, cvd_change, 1.0,
+                                )
+                                if result:
+                                    grab_dir = result.get("direction", "NEUTRAL")
                                     vol_ratio = last.v / avg_vol if avg_vol > 0 else 1.0
-                                    passed, _ = self._gates.check_all(asset, level.score, vol_ratio, self._vix, hunt_dir, bias)
+                                    passed, _ = self._gates.check_all(asset, level.score, vol_ratio, self._vix, grab_dir, bias)
                                     if passed:
-                                        self._log(f"SIM DETECT: {asset} STOP_HUNT {hunt_dir} at {level.name} ${level.price:.2f}")
-                                        await self._fire_agent(asset, "STOP_HUNT", hunt_dir, level, last, vol_ratio, cvd_change)
+                                        self._log(f"SIM DETECT: {asset} LIQUIDITY_GRAB {grab_dir} at {level.name} ${level.price:.2f}")
+                                        await self._fire_agent(asset, "LIQUIDITY_GRAB", grab_dir, level, last, vol_ratio, cvd_change)
                                         break
                             except Exception:
                                 pass
@@ -336,9 +415,10 @@ class MultiEngine:
                 ticker = yf.Ticker(asset)
                 dfd = ticker.history(period="2y", interval="1d")
                 daily = []
-                for ts, row in dfd.iterrows():
+                for idx, row in dfd.iterrows():
                     try:
-                        c = Candle(t=int(ts.timestamp()*1000), o=round(float(row["Open"]),2),
+                        ts_ms = int(idx.timestamp() * 1000) if hasattr(idx, 'timestamp') else 0  # type: ignore[union-attr]
+                        c = Candle(t=ts_ms, o=round(float(row["Open"]),2),
                                    h=round(float(row["High"]),2), l=round(float(row["Low"]),2),
                                    c=round(float(row["Close"]),2), v=float(row["Volume"]))
                         if c.c > 0 and c.h >= c.l:
@@ -360,9 +440,10 @@ class MultiEngine:
                 ticker = yf.Ticker(asset)
                 df1m = ticker.history(period="5d", interval="1m")
                 all_1m = []
-                for ts, row in df1m.iterrows():
+                for idx, row in df1m.iterrows():
                     try:
-                        c = Candle(t=int(ts.timestamp()*1000), o=round(float(row["Open"]),2),
+                        ts_ms = int(idx.timestamp() * 1000) if hasattr(idx, 'timestamp') else 0  # type: ignore[union-attr]
+                        c = Candle(t=ts_ms, o=round(float(row["Open"]),2),
                                    h=round(float(row["High"]),2), l=round(float(row["Low"]),2),
                                    c=round(float(row["Close"]),2), v=float(row["Volume"]))
                         if c.c > 0 and c.h >= c.l:
@@ -519,8 +600,13 @@ class MultiEngine:
     def _log(self, msg: str, level: str = "info"):
         print(f"[{now_et().strftime('%H:%M:%S')}] [{level.upper()}] {msg}")
 
+    def _is_stale(self, asset: str, threshold_sec: float = 30.0) -> bool:
+        last = self._last_tick_ts.get(asset, 0)
+        return last > 0 and (time.time() - last) > threshold_sec
+
     async def _handle_tick(self, asset, price, volume, ts_ms):
         self._last_tick_time[asset] = time.time()
+        self._last_tick_ts[asset] = time.time()
         self._health[asset].last_tick_at = time.time()
         # In sim mode, advance the simulated clock from tick timestamps
         if self._sim_mode:
@@ -581,6 +667,10 @@ class MultiEngine:
         self._ws_disconnect_count += 1
         for asset in ASSETS:
             self._health[asset].ws_disconnects = self._ws_disconnect_count
+            self._cvd.get(asset).set_estimated(True)  # CVD is unreliable after reconnect
+
+    def _is_cvd_quarantined(self, asset: str) -> bool:
+        return self._cvd.get(asset).is_estimated
 
     async def on_1m_close(self, asset: str):
         if not self._sim_mode and not is_trading_hours():
@@ -600,9 +690,11 @@ class MultiEngine:
         last = bars[-1]
         cvd_now = self._cvd.value(asset)
         cvd_prev = self._cvd.get(asset).value_1min_ago
+        # Record CVD turn for rolling average
+        cvd_1m_turn = cvd_now - cvd_prev
+        self._cvd.get(asset).record_cvd_turn(cvd_1m_turn)
         avg_vol = self._avg_vol(asset, "1m")
         atr = self._calc_atr(asset)
-        price = store.live_price
 
         self._update_or(asset, bars)
 
@@ -614,81 +706,58 @@ class MultiEngine:
 
         # Heavy compute (levels + volume profile) moved to on_5m_close
 
-        if not self._investigating[asset]:
-            confirmed, failed = self._tracker.on_1m_close(asset, last, cvd_now, cvd_prev, avg_vol, price, atr)
-            for t in confirmed:
-                level = self._find_level(asset, t.level_name)
-                if level:
-                    await self._fire_agent(asset, "BREAKOUT_RETEST", t.direction, level, t.break_candle, t.volume_ratio, t.cvd_at_break, t.retest_candle, t.cvd_at_retest, True)
-
-            # Failed breakout → reverse signal (trapped traders exiting)
-            for t in failed:
-                if self._investigating[asset]:
-                    break
-                # Verify conviction: the fail candle must breach level by ATR × 0.1
-                if not detect_failed_retest(last, t, atr):
-                    continue  # Limbo state — not enough conviction to short/long the reverse
-                # Confirm with CVD aligning to the reverse direction
-                if confirm_failed_breakout(last, t, cvd_now, cvd_prev):
-                    reverse_dir = get_reverse_direction(t.direction)
-                    level = self._find_level(asset, t.level_name)
-                    if level:
-                        self._log(f"{asset} FAILED BREAKOUT at {t.level_name} ${t.level_price:.2f} → {reverse_dir}")
-                        await self._fire_agent(asset, "FAILED_BREAKOUT", reverse_dir, level, last, t.volume_ratio, cvd_now - cvd_prev)
+        # V3.2: BREAKOUT_RETEST and FAILED_BREAKOUT removed — not in V3.0 spec.
+        # Tracker still used for is_locked() duplicate prevention.
 
         if not self._investigating[asset]:
-            await self._check_stop_hunts(asset, last, cvd_now, cvd_prev, avg_vol)
+            await self._check_liquidity_grabs(asset, last, cvd_now, cvd_prev, avg_vol)
 
-        await self._confirm_pending(asset, last, cvd_now, cvd_prev)
-        await self._confirm_pending_rejections(asset, last)
+        # S3B 1m Sniper: check for rejection on 1m candle using 5m approach context
+        if not self._investigating[asset]:
+            await self._check_s3b_sniper(asset, bars, last, cvd_now, cvd_prev, avg_vol, atr)
 
-    async def _confirm_pending_rejections(self, asset: str, candle):
-        """1-bar confirmation for pending rejections. Price must hold on rejection side."""
-        to_remove = []
-        for key, p in self._pending_rejections.items():
-            if p["asset"] != asset:
+    async def _check_s3b_sniper(self, asset, bars_1m, candle, cvd_now, cvd_prev, avg_vol_1m, atr):
+        """S3B 1m sniper — uses 5m approach context, triggers on 1m rejection candle."""
+        store = self._candles.get(asset)
+        bars_5m = store.closed_5m
+        if len(bars_5m) < 3:
+            return
+
+        dc = self._day_contexts.get(asset)
+        bias = dc.bias if dc else "NEUTRAL"
+        cvd_eng = self._cvd.get(asset)
+        cvd_turn = cvd_now - cvd_prev
+        rolling_avg_cvd = cvd_eng.rolling_avg_cvd_turn(10)
+        cvd_quarantine = self._is_cvd_quarantined(asset)
+
+        # S3B only — S3A is handled in on_5m_close outside the level loop
+        from ..detection.failed_auction import _detect_major_level
+        for level in self._levels[asset]:
+            if level.score < 8 or self._tracker.is_locked(asset, level.name):
                 continue
-            p["candles_seen"] += 1
-
-            level = p["level"]
-            direction = p["direction"]
-
-            # Check if price held on rejection side
-            if direction == "BEARISH":
-                if candle.c >= level.price:
-                    # Price crossed back above — rejection failed
-                    to_remove.append(key)
-                    continue
-                # Confirmed: still below level
-                confirmed = True
-            elif direction == "BULLISH":
-                if candle.c <= level.price:
-                    # Price crossed back below — rejection failed
-                    to_remove.append(key)
-                    continue
-                confirmed = True
-            else:
-                to_remove.append(key)
-                continue
-
-            if confirmed:
-                self._locked_rejection_levels[asset].add(level.name)
-                to_remove.append(key)
-                if not self._investigating[asset]:
-                    self._log(f"{asset} REJECTION CONFIRMED {direction} ({p['strength']}) at {level.name} ${level.price:.2f}")
-                    await self._fire_agent(
-                        asset, "REJECTION", direction, level,
-                        p["candle"], p["vol_ratio"], p["cvd_change"],
-                        strength=p["strength"],
-                    )
-                continue
-
-            # Expire after 2 candles with no confirmation
-            if p["candles_seen"] >= 2:
-                to_remove.append(key)
-
-        for k in to_remove:
-            self._pending_rejections.pop(k, None)
+            try:
+                result = _detect_major_level(
+                    bars_5m, level, atr, avg_vol_1m, cvd_turn, rolling_avg_cvd,
+                    cvd_quarantine, bias, candles_1m=bars_1m[-10:],
+                )
+                if result:
+                    fa_dir = result.get("direction", "NEUTRAL")
+                    vol_ratio = candle.v / avg_vol_1m if avg_vol_1m > 0 else 1.0
+                    passed, _ = self._gates.check_all(asset, level.score, vol_ratio, self._vix, fa_dir, bias)
+                    if passed:
+                        approach = result.get("approach")
+                        self._log(f"{asset} FAILED_AUCTION_MAJOR {fa_dir} at {level.name} ${level.price:.2f}")
+                        self._tracker._locked.add(self._tracker._key(asset, level.name))
+                        await self._fire_agent(
+                            asset, "FAILED_AUCTION_MAJOR", fa_dir, level,
+                            candle, vol_ratio, cvd_turn,
+                            approach_type=approach.type if approach else "",
+                            approach_confidence_pts=approach.confidence_pts if approach else 0,
+                            cvd_quarantine=cvd_quarantine,
+                        )
+                        break
+            except Exception:
+                pass
 
     async def on_5m_close(self, asset: str):
         if not self._sim_mode and not is_trading_hours():
@@ -702,7 +771,7 @@ class MultiEngine:
         if len(bars) < 2:
             return
 
-        # Heavy compute on 5m close (moved from 1m to reduce CPU thrashing)
+        # Heavy compute on 5m close
         await self._update_levels(asset)
         today_bars = filter_today_bars(store.closed_1m)
         if len(today_bars) >= 5:
@@ -710,6 +779,10 @@ class MultiEngine:
             vp = compute_volume_profile(asset, today_bars, atr=atr)
             if vp:
                 self._vol_profiles[asset] = vp
+
+        # Re-assess day type and bias on every 5m close (not just at OR lock)
+        if self._or_locked[asset]:
+            self._assess_day(asset)
 
         if asset == "SPY":
             self._log(f"SPY 5m_close: {len(bars)} bars, last c=${bars[-1].c:.2f}, levels={len(self._levels.get(asset, []))}")
@@ -723,117 +796,172 @@ class MultiEngine:
         dc = self._day_contexts.get(asset)
         bias = dc.bias if dc else "NEUTRAL"
 
+        atr = self._calc_atr(asset)
+        avg_vol_1m = self._avg_vol(asset, "1m")
+        bars_1m = store.closed_1m
+        cvd_eng = self._cvd.get(asset)
+        cvd_turn = cvd_close - cvd_open
+        rolling_avg_cvd = cvd_eng.rolling_avg_cvd_turn(10)
+        day_type = dc.day_type if dc else "RANGE"
+
+        # Volume profile values for failed_auction
+        vp = self._vol_profiles.get(asset)
+        vah = vp.vah if vp else 0.0
+        val_price = vp.val if vp else 0.0
+        poc = vp.poc if vp else 0.0
+        now_hour = now_et().hour + now_et().minute / 60.0
+
+        cvd_quarantine = self._is_cvd_quarantined(asset)
+
+        # ── S3A: Value Area Rejection (OUTSIDE level loop — uses VAH/VAL only) ──
+        # V3.1: Check both prior day VP (preferred) and today's developing VP
+        s3a_checks = []
+        pdvp = self._prior_day_vp.get(asset)
+        if pdvp and pdvp.vah and pdvp.val and pdvp.poc:
+            pd_level = next((lv for lv in self._levels[asset] if lv.name in ("pdVAH", "pdVAL", "pdPOC")), None)
+            if not pd_level:
+                pd_level = Level(name="pdVAH", price=pdvp.vah, score=9, type="resistance", source="PD_VOLUME", confidence="HIGH")
+            s3a_checks.append((pdvp.vah, pdvp.val, pdvp.poc, pd_level, "prior day"))
+        if vah and val_price and poc:
+            d_level = next((lv for lv in self._levels[asset] if lv.name in ("dVAH", "dVAL", "dPOC")), None)
+            if not d_level:
+                d_level = Level(name="dVAH", price=vah, score=7, type="resistance", source="VOLUME", confidence="HIGH")
+            s3a_checks.append((vah, val_price, poc, d_level, "developing"))
+
+        if not self._investigating[asset] and now_hour >= 11.0:
+            from ..detection.failed_auction import _detect_var
+            for s3a_vah, s3a_val, s3a_poc, var_level, vp_label in s3a_checks:
+                if self._investigating[asset]:
+                    break
+                try:
+                    result = _detect_var(
+                        bars, var_level, atr, avg_vol, cvd_turn, rolling_avg_cvd,
+                        s3a_vah, s3a_val, s3a_poc, now_hour, cvd_quarantine, bias,
+                    )
+                    if result:
+                        fa_dir = result.get("direction", "NEUTRAL")
+                        vol_ratio = last.v / avg_vol if avg_vol > 0 else 1.0
+                        passed, _ = self._gates.check_all(asset, var_level.score, vol_ratio, self._vix, fa_dir, bias)
+                        if passed:
+                            approach = result.get("approach")
+                            self._log(f"{asset} FAILED_AUCTION_VAR {fa_dir} at {vp_label} VAH/VAL target=POC ${s3a_poc:.2f}")
+                            await self._fire_agent(
+                                asset, "FAILED_AUCTION_VAR", fa_dir, var_level, last, vol_ratio, cvd_turn,
+                                approach_type=approach.type if approach else "",
+                                approach_confidence_pts=approach.confidence_pts if approach else 0,
+                                cvd_quarantine=cvd_quarantine,
+                            )
+                            break
+                except Exception:
+                    pass
+
+        # ── Level loop: S2 (OB Defense) + S3B (Major Level Rejection) ──
         for level in self._levels[asset]:
-            if level.score < 6 or self._tracker.is_locked(asset, level.name):
+            if level.score < MIN_LEVEL_SCORE or self._tracker.is_locked(asset, level.name):
                 continue
-
-            is_bo, bo_dir = detect_breakout(last, prev, level, avg_vol, cvd_open, cvd_close)
-            if is_bo and asset == "SPY":
-                self._log(f"SPY BREAKOUT DETECTED {bo_dir} at {level.name} ${level.price:.2f}")
-            if is_bo:
-                vol_ratio = last.v / avg_vol if avg_vol > 0 else 1.0
-                passed, reason = self._gates.check_all(asset, level.score, vol_ratio, self._vix, bo_dir, bias)
-                if not passed:
-                    continue
-                self._tracker.start(asset, level.name, level.price, level.score, bo_dir, last, cvd_close, vol_ratio)
-                self._log(f"{asset} BREAKOUT {bo_dir} at {level.name} ${level.price:.2f}")
-                continue
-
-            # Rejection: score >= 8 check BEFORE detection (CPU optimization)
-            if level.score < 8:
-                continue
-            # Dedup: skip levels already fired today
-            if level.name in self._locked_rejection_levels[asset]:
-                continue
-            atr = self._calc_atr(asset)
-            is_rej, rej_dir, strength = detect_rejection(last, level, avg_vol, cvd_open, cvd_close, atr)
-            if is_rej:
-                vol_ratio = last.v / avg_vol if avg_vol > 0 else 1.0
-                passed, reason = self._gates.check_all(asset, level.score, vol_ratio, self._vix, rej_dir, bias)
-                if not passed:
-                    continue
-                # Queue for 1m confirmation instead of firing immediately
-                self._pending_rejections[f"{asset}_{level.name}"] = {
-                    "asset": asset, "level": level, "direction": rej_dir,
-                    "candle": last, "vol_ratio": vol_ratio, "strength": strength,
-                    "cvd_change": cvd_close - cvd_open, "candles_seen": 0,
-                }
-                self._log(f"{asset} REJECTION {rej_dir} ({strength}) at {level.name} ${level.price:.2f} — pending confirmation")
+            if self._investigating[asset]:
                 break
 
-        # Continuation breakout: price above/below level for 3+ consecutive 5m bars
-        # Catches breakouts missed by one-shot detection (volume/CVD just under threshold)
-        if not self._investigating[asset] and len(bars) >= 4:
-            for level in self._levels[asset]:
-                if level.score < MIN_LEVEL_SCORE:
-                    continue
-                if self._tracker.is_locked(asset, level.name):
-                    continue
-                if level.name in self._locked_stop_hunt_levels.get(asset, set()):
-                    continue
-                if level.name in self._locked_rejection_levels.get(asset, set()):
-                    continue
-                recent = bars[-4:]
-                all_above = all(b.c > level.price for b in recent)
-                all_below = all(b.c < level.price for b in recent)
-                if not all_above and not all_below:
-                    continue
-                if last.v < avg_vol * 1.0:
-                    continue
-                cont_dir = "BULLISH" if all_above else "BEARISH"
-                vol_ratio = last.v / avg_vol if avg_vol > 0 else 1.0
-                passed, _ = self._gates.check_all(asset, level.score, vol_ratio, self._vix, cont_dir, bias)
-                if not passed:
-                    continue
-                self._tracker._locked.add(self._tracker._key(asset, level.name))
-                self._log(f"{asset} BREAKOUT_CONTINUATION {cont_dir} at {level.name} ${level.price:.2f}")
-                await self._fire_agent(asset, "BREAKOUT_CONTINUATION", cont_dir, level, last, vol_ratio, cvd_close - cvd_open)
-                break
+            # Setup 2: OB Defense
+            try:
+                result = detect_ob_defense(
+                    bars, bars_1m, level, atr, avg_vol, avg_vol_1m,
+                    cvd_turn, rolling_avg_cvd, day_type, bias,
+                    cvd_quarantine=cvd_quarantine,
+                )
+                if result:
+                    ob_dir = result.get("direction", "NEUTRAL")
+                    vol_ratio = last.v / avg_vol if avg_vol > 0 else 1.0
+                    passed, reason = self._gates.check_all(asset, level.score, vol_ratio, self._vix, ob_dir, bias)
+                    if passed:
+                        approach = result.get("approach")
+                        self._log(f"{asset} OB_DEFENSE {ob_dir} at {level.name} ${level.price:.2f}")
+                        await self._fire_agent(
+                            asset, "OB_DEFENSE", ob_dir, level, last, vol_ratio, cvd_turn,
+                            approach_type=approach.type if approach else "",
+                            approach_confidence_pts=approach.confidence_pts if approach else 0,
+                            cvd_quarantine=cvd_quarantine,
+                        )
+                        break
+            except Exception:
+                pass
 
-    async def _check_stop_hunts(self, asset, candle, cvd_now, cvd_prev, avg_vol):
+            # Setup 3B: Major Level Rejection (S3B only — S3A moved out of loop)
+            if level.score >= 8:
+                try:
+                    from ..detection.failed_auction import _detect_major_level
+                    result = _detect_major_level(
+                        bars, level, atr, avg_vol_1m, cvd_turn, rolling_avg_cvd,
+                        cvd_quarantine, bias, candles_1m=bars_1m[-10:],
+                    )
+                    if result:
+                        fa_dir = result.get("direction", "NEUTRAL")
+                        vol_ratio = last.v / avg_vol if avg_vol > 0 else 1.0
+                        passed, reason = self._gates.check_all(asset, level.score, vol_ratio, self._vix, fa_dir, bias)
+                        if passed:
+                            approach = result.get("approach")
+                            self._log(f"{asset} FAILED_AUCTION_MAJOR {fa_dir} at {level.name} ${level.price:.2f}")
+                            self._tracker._locked.add(self._tracker._key(asset, level.name))
+                            await self._fire_agent(
+                                asset, "FAILED_AUCTION_MAJOR", fa_dir, level, last, vol_ratio, cvd_turn,
+                                approach_type=approach.type if approach else "",
+                                approach_confidence_pts=approach.confidence_pts if approach else 0,
+                                cvd_quarantine=cvd_quarantine,
+                            )
+                            break
+                except Exception:
+                    pass
+
+    async def _check_liquidity_grabs(self, asset, candle, cvd_now, cvd_prev, avg_vol):
         dc = self._day_contexts.get(asset)
         bias = dc.bias if dc else "NEUTRAL"
+        atr = self._calc_atr(asset)
+        store = self._candles.get(asset)
+        bars_1m = store.closed_1m[-10:]  # last 10 1m bars for liquidity grab detection
+        cvd_quarantine = self._is_cvd_quarantined(asset)
         for level in self._levels[asset]:
-            if level.score < 6 or self._tracker.is_locked(asset, level.name):
-                continue
-            # Stop hunt dedup: skip levels already fired today
-            if level.name in self._locked_stop_hunt_levels[asset]:
+            if level.score < MIN_LEVEL_SCORE or self._tracker.is_locked(asset, level.name):
                 continue
             cvd_change = cvd_now - cvd_prev
-            is_hunt, hunt_dir = detect_stop_hunt(candle, level, avg_vol, cvd_change)
-            if is_hunt:
-                vol_ratio = candle.v / avg_vol if avg_vol > 0 else 1.0
-                passed, _ = self._gates.check_all(asset, level.score, vol_ratio, self._vix, hunt_dir, bias)
-                if passed:
-                    self._pending_stop_hunts[f"{asset}_{level.name}"] = {
-                        "asset": asset, "level": level, "direction": hunt_dir,
-                        "candle": candle, "vol_ratio": vol_ratio,
-                        "candles_seen": 0, "max_candles": 2,
-                    }
+            cvd_eng = self._cvd.get(asset)
+            rolling_avg_cvd = cvd_eng.rolling_avg_cvd_turn(10)
+            try:
+                result = detect_liquidity_grab(
+                    bars_1m, level, atr, avg_vol, cvd_change, rolling_avg_cvd,
+                    cvd_quarantine=cvd_quarantine, day_bias=bias,
+                )
+                if result:
+                    grab_dir = result.get("direction", "NEUTRAL")
+                    vol_ratio = candle.v / avg_vol if avg_vol > 0 else 1.0
+                    passed, _ = self._gates.check_all(asset, level.score, vol_ratio, self._vix, grab_dir, bias)
+                    if passed:
+                        self._log(f"{asset} LIQUIDITY_GRAB {grab_dir} at {level.name} ${level.price:.2f}")
+                        self._tracker._locked.add(self._tracker._key(asset, level.name))
+                        approach = result.get("approach")
+                        await self._fire_agent(
+                            asset, "LIQUIDITY_GRAB", grab_dir, level, candle, vol_ratio, cvd_change,
+                            approach_type=approach.type if approach else "",
+                            approach_confidence_pts=approach.confidence_pts if approach else 0,
+                            cvd_quarantine=cvd_quarantine,
+                        )
+                        break
+            except Exception:
+                pass
 
-    async def _confirm_pending(self, asset, candle, cvd_now, cvd_prev):
-        to_remove = []
-        for key, p in self._pending_stop_hunts.items():
-            if p["asset"] != asset:
-                continue
-            # Track candle closes instead of wall clock (fixes 90s clock mismatch)
-            p["candles_seen"] = p.get("candles_seen", 0) + 1
-            if p["candles_seen"] > p.get("max_candles", 2):
-                to_remove.append(key)
-                continue
-            if confirm_stop_hunt(candle, p["direction"], p["level"], cvd_now, cvd_prev):
-                await self._fire_agent(asset, "STOP_HUNT", p["direction"], p["level"], p["candle"], p["vol_ratio"], cvd_now - cvd_prev)
-                # Lock this level for the day — prevent re-firing on same level
-                self._locked_stop_hunt_levels[asset].add(p["level"].name)
-                to_remove.append(key)
-        for k in to_remove:
-            self._pending_stop_hunts.pop(k, None)
-
-    async def _fire_agent(self, asset, pattern, direction, level, candle, vol_ratio, cvd_change, retest_candle=None, cvd_at_retest=0.0, cvd_turned=False, strength=""):
+    async def _fire_agent(self, asset, pattern, direction, level, candle, vol_ratio, cvd_change, retest_candle=None, cvd_at_retest=0.0, cvd_turned=False, strength="", approach_type="", approach_confidence_pts=0, cvd_quarantine=False):
         if self._investigating[asset]:
             return
         self._investigating[asset] = True
+        signal_born = time.time()
         try:
+            await self._agent_lock.acquire()
+
+            # V3.3 Signal TTL — drop stale signals that waited too long on the lock
+            wait_delta = time.time() - signal_born
+            if wait_delta > 20.0:
+                self._log(f"{asset} STALE_SIGNAL_SKIPPED: {pattern} {direction} at {level.name} — waited {wait_delta:.1f}s in queue", "warning")
+                return
+
             store = self._candles.get(asset)
             price = store.live_price
             atr = self._calc_atr(asset)
@@ -859,6 +987,9 @@ class MultiEngine:
                 session_name=session.label, session_quality=session.quality,
                 minutes_to_cutoff=minutes_to_cutoff(), tests_today=level.tests_today,
                 verification_data=verification_data, strength=strength,
+                approach_type=approach_type,
+                approach_confidence_pts=approach_confidence_pts,
+                cvd_quarantine=cvd_quarantine,
             )
 
             # Pre-compute trade fields so send_signal auto-fills them
@@ -892,20 +1023,13 @@ class MultiEngine:
             # Options pre-compute
             from ..context.options_context import get_options_env
             opts_env = get_options_env(self._vix)
-            from ..core.asset_registry import get_config, has_daily_expiry
+            from ..core.asset_registry import get_config
             cfg = get_config(asset)
             minor = cfg["round_interval_minor"]
             import math
-            from datetime import timedelta
             atm = round(round(price / minor) * minor, 2) if price > 0 else 0
-            now = now_et()
-            hour = now.hour + now.minute / 60.0
-            daily_exp = has_daily_expiry(asset)
-            if hour < 11: s_dte = 0 if daily_exp and now.weekday() == 4 else 1
-            elif hour < 13: s_dte = 1 if daily_exp else 2
-            elif hour < 14.5: s_dte = 0 if daily_exp else 1
-            else: s_dte = 0
-            s_expiry = (now + timedelta(days=s_dte)).strftime("%b %d")
+            from ..context.options_context import get_expiry
+            s_dte, s_expiry, _ = get_expiry(asset)
             daily_move = (price * (self._vix / 100)) / math.sqrt(252) if price > 0 and self._vix > 0 else 0
             prem = daily_move * 0.4
             s_opt_type = "CALL" if direction == "BULLISH" else "PUT"
@@ -930,7 +1054,10 @@ class MultiEngine:
             try:
                 await asyncio.wait_for(
                     run_agent(handler, brief, self._openai_key,
-                              on_complete=lambda sig: self._on_agent_complete(asset, level, sig)),
+                              on_complete=lambda sig: self._on_agent_complete(asset, level, sig),
+                              on_tool_call=self._on_tool_call,
+                              on_token=self._on_token,
+                              on_error=self._make_agent_error_handler(asset)),
                     timeout=70.0,
                 )
             except asyncio.TimeoutError:
@@ -939,7 +1066,14 @@ class MultiEngine:
         except Exception as e:
             self._log(f"{asset} agent error: {e}", "error")
         finally:
+            if self._agent_lock.locked():
+                self._agent_lock.release()
             self._investigating[asset] = False
+
+    def _make_agent_error_handler(self, asset):
+        async def _handler(err):
+            self._log(f"{asset} AGENT ERROR: {err}", "error")
+        return _handler
 
     async def _on_agent_complete(self, asset, level, signal):
         if not signal:
@@ -983,6 +1117,7 @@ class MultiEngine:
             or_done = is_or_complete()
         if or_done and not self._or_locked[asset]:
             self._or_locked[asset] = True
+            self._tracker.reset_daily()
             self._log(f"{asset} OR locked H:${self._or_high[asset]:.2f} L:${self._or_low[asset]:.2f}")
             self._assess_day(asset)
 
@@ -993,8 +1128,17 @@ class MultiEngine:
 
     def _assess_day(self, asset):
         store = self._candles.get(asset)
-        dc = assess_day_context(asset, store.c_daily, store.closed_15m, filter_today_bars(store.closed_1m),
-                                self._or_high[asset], self._or_low[asset], store.live_price)
+        today_bars = filter_today_bars(store.closed_1m)
+        atr = self._calc_atr(asset)
+        vwap = calc_vwap(today_bars)
+        pdvp = self._prior_day_vp.get(asset)
+        pd_vah = pdvp.vah if pdvp else 0.0
+        pd_val = pdvp.val if pdvp else 0.0
+        dc = assess_day_context(
+            asset, store.c_daily, store.closed_15m, today_bars,
+            self._or_high[asset], self._or_low[asset], store.live_price,
+            atr=atr, pd_vah=pd_vah, pd_val=pd_val, vwap=vwap,
+        )
         self._day_contexts[asset] = dc
         self._log(f"{asset} day: {dc.day_type} {dc.bias}")
 
@@ -1007,31 +1151,36 @@ class MultiEngine:
         vwap = calc_vwap(today)
         dc = self._day_contexts.get(asset)
         gap_pct = dc.gap_pct if dc else 0.0
+
+        # V3.1: Compute prior day VP once (cached — immutable for the session)
+        if asset not in self._prior_day_vp and len(store.closed_1m) > 30:
+            atr = self._calc_atr(asset)
+            pdvp = compute_prior_day_profile(asset, store.closed_1m, atr=atr)
+            if pdvp:
+                self._prior_day_vp[asset] = pdvp
+                self._log(f"{asset} V3.1: prior day VP computed — pdPOC=${pdvp.poc:.2f} pdVAH=${pdvp.vah:.2f} pdVAL=${pdvp.val:.2f}")
+
         self._levels[asset] = build_levels(
             asset, store.c_daily, today, store.closed_5m, price, vwap,
             self._or_high[asset], self._or_low[asset], self._or_locked[asset],
             self._vol_profiles.get(asset), self._zones.get(asset, []),
             gap_pct=gap_pct,
+            prior_day_vp=self._prior_day_vp.get(asset),
         )
 
     def _find_level(self, asset, name):
         return next((l for l in self._levels[asset] if l.name == name), None)
 
     def _avg_vol(self, asset, tf):
+        """Rolling average of last 10 bars (excluding current bar).
+        Per v2.1 spec: rolling_avg(last_10_bars) — local window, not session-wide."""
         store = self._candles.get(asset)
         bars = store.closed_1m if tf == "1m" else store.closed_5m
         if not bars: return 0.0
-        # Exclude the current bar (don't let a spike dilute its own comparison)
         prior = bars[:-1] if len(bars) > 1 else bars
-        # Exclude OR bars (first 30 1m / first 6 5m)
-        or_cutoff = 30 if tf == "1m" else 6
-        non_or = prior[or_cutoff:] if len(prior) > or_cutoff else prior
-        s = non_or[-20:]
+        s = prior[-10:]
         if not s: return 0.0
-        # Median — resistant to spikes, stable with small samples
-        vols = sorted(c.v for c in s)
-        mid = len(vols) // 2
-        return vols[mid] if len(vols) % 2 else (vols[mid - 1] + vols[mid]) / 2
+        return sum(c.v for c in s) / len(s)
 
     def _calc_atr(self, asset, period=14):
         bars = self._candles.get(asset).closed_1m[-(period+1):]

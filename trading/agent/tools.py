@@ -44,7 +44,8 @@ class ToolHandler:
             va = "INSIDE VA" if vp.val <= price <= vp.vah else "ABOVE VA" if price > vp.vah else "BELOW VA"
             parts.append(f"VOL PROFILE — {asset}: POC ${vp.poc:.2f} ({pos}), {va}, VAH ${vp.vah:.2f}, VAL ${vp.val:.2f}")
 
-        return "\n\n".join(parts)
+        result = "\n\n".join(parts)
+        return result[:2000] if len(result) > 2000 else result
 
     def get_candles(self, asset: str, timeframe: str, count: int = 10) -> str:
         if asset not in ASSETS:
@@ -65,7 +66,8 @@ class ToolHandler:
             vr = f"{c.v/avg_v:.1f}x" if avg_v > 0 else "-"
             wr = f"{c.wick_body_ratio:.1f}x" if c.body > 0.01 else "DOJI"
             lines.append(f"  {dt.strftime('%H:%M')} {color:5} O:{c.o:.2f} H:{c.h:.2f} L:{c.l:.2f} C:{c.c:.2f} vol:{vr} wick/body:{wr}")
-        return "\n".join(lines)
+        result = "\n".join(lines)
+        return result[:2000] if len(result) > 2000 else result
 
     def get_cvd(self, asset: str, minutes: int = 15) -> str:
         if asset not in ASSETS:
@@ -87,7 +89,8 @@ class ToolHandler:
                 lines.append(f"  DIVERGENCE: {div['type']} — {div['detail']}")
             else:
                 lines.append(f"  No divergence — CVD confirms price")
-        return "\n".join(lines)
+        result = "\n".join(lines)
+        return result[:2000] if len(result) > 2000 else result
 
     def get_setup_context(self, asset: str) -> str:
         s = self._setup
@@ -98,7 +101,8 @@ class ToolHandler:
         if ec:
             lines.append(f"  Candle: O:{ec.o:.2f} H:{ec.h:.2f} L:{ec.l:.2f} C:{ec.c:.2f}")
             lines.append(f"  Volume: {s.get('volume_ratio',0):.1f}x avg | CVD: {s.get('cvd_change',0):+,.0f}")
-        return "\n".join(lines)
+        result = "\n".join(lines)
+        return result[:2000] if len(result) > 2000 else result
 
     def get_level_info(self, asset: str, level_name: str) -> str:
         levels = self._levels.get(asset, [])
@@ -109,7 +113,8 @@ class ToolHandler:
         if level.confluence_with:
             lines.append(f"  CONFLUENCE: {', '.join(level.confluence_with)} — score boosted")
         lines.append(f"  Tests today: {level.tests_today}" + (" (fresh — strong reaction expected)" if level.tests_today == 0 else ""))
-        return "\n".join(lines)
+        result = "\n".join(lines)
+        return result[:2000] if len(result) > 2000 else result
 
     def get_level_map(self, asset: str) -> str:
         levels = self._levels.get(asset, [])
@@ -130,7 +135,8 @@ class ToolHandler:
             d = price - l.price
             conf = " *CONF" if l.confluence_with else ""
             lines.append(f"    {l.name:8} ${l.price:.2f}  -${d:.2f} ({d/atr:.1f}x ATR) score:{l.score}{conf}")
-        return "\n".join(lines)
+        result = "\n".join(lines)
+        return result[:2000] if len(result) > 2000 else result
 
     def get_volume_profile(self, asset: str) -> str:
         vp = self._vol_profiles.get(asset)
@@ -142,7 +148,8 @@ class ToolHandler:
         lines = [f"VOLUME PROFILE — {asset}", f"  POC: ${vp.poc:.2f} (strongest magnet)", f"  VAH: ${vp.vah:.2f} | VAL: ${vp.val:.2f}", f"  Price {pos} POC, {va}"]
         if vp.hvn_list:
             lines.append("  HVN targets: " + ", ".join(f"${h:.2f}" for h in vp.hvn_list[:3]))
-        return "\n".join(lines)
+        result = "\n".join(lines)
+        return result[:2000] if len(result) > 2000 else result
 
     def get_trend(self, asset: str) -> str:
         store = self._candles.get(asset)
@@ -158,7 +165,8 @@ class ToolHandler:
             if b15[-1].c > b15[0].c and b15[-1].l > b15[1].l: lines.append("  15m: BULLISH")
             elif b15[-1].c < b15[0].c and b15[-1].h < b15[1].h: lines.append("  15m: BEARISH")
             else: lines.append("  15m: NEUTRAL")
-        return "\n".join(lines)
+        result = "\n".join(lines)
+        return result[:2000] if len(result) > 2000 else result
 
     def get_day_context(self, asset: str) -> str:
         dc = self._day_contexts.get(asset)
@@ -169,7 +177,8 @@ class ToolHandler:
             lines.append(f"  OR: ${dc.or_high:.2f} / ${dc.or_low:.2f}")
         if dc.relative_str != 0:
             lines.append(f"  Relative strength: {dc.relative_str:+.1f}%")
-        return "\n".join(lines)
+        result = "\n".join(lines)
+        return result[:2000] if len(result) > 2000 else result
 
     def get_options_context(self, asset: str) -> str:
         vix = self._vix
@@ -205,7 +214,8 @@ class ToolHandler:
             lines.append(f"  Break-even: ${price+prem:.2f} (calls) / ${price-prem:.2f} (puts)")
         if hour > 14.5:
             lines.append("  WARNING: Late session — theta decay rapid. TP1 only.")
-        return "\n".join(lines)
+        result = "\n".join(lines)
+        return result[:2000] if len(result) > 2000 else result
 
     def get_session(self) -> str:
         now = now_et()
@@ -223,6 +233,7 @@ class ToolHandler:
 
     def get_signal_history(self, asset: str) -> str:
         sigs = self._signal_history if asset == "ALL" else [s for s in self._signal_history if s.asset == asset]
+        sigs = sigs[-200:]
         if not sigs:
             return f"No signals today for {asset}"
         lines = [f"SIGNALS — {asset}"]
@@ -230,7 +241,8 @@ class ToolHandler:
             lines.append(f"  {s.fired_at} {s.asset} {s.direction} {s.pattern} @ ${s.entry:.2f} conf:{s.confidence}")
         count = len([s for s in sigs if s.direction in ("LONG", "SHORT")])
         lines.append(f"  Budget: {count}/{MAX_SIGNALS_PER_ASSET} used")
-        return "\n".join(lines)
+        result = "\n".join(lines)
+        return result[:2000] if len(result) > 2000 else result
 
     def calculate_rr(self, entry: float, stop: float, target: float) -> str:
         risk = abs(entry - stop)
@@ -246,7 +258,8 @@ class ToolHandler:
             direction = 1 if target > entry else -1
             min_target = entry + risk * MIN_RR * direction
             lines.append(f"INSUFFICIENT — need {MIN_RR}:1. Min target: ${min_target:.2f}")
-        return "\n".join(lines)
+        result = "\n".join(lines)
+        return result[:2000] if len(result) > 2000 else result
 
     def send_signal(self, signal: str, confidence: int = 0, narrative: str = "", reasoning: str = "", invalidation: str = "", wait_for: str = "",
                     asset: str = "", setup_type: str = "", entry: float = 0, stop: float = 0, tp1: float = 0, tp2: float = 0, rr: float = 0,
@@ -283,8 +296,10 @@ class ToolHandler:
         est_premium_hi = est_premium_hi or s.get("est_premium_hi", 0)
         breakeven = breakeven or s.get("breakeven", 0)
         instrument = instrument or s.get("instrument", "")
+        approach_type = s.get("approach_type", "")
         sig = Signal(
-            asset=asset, direction=signal, confidence=conf_label, confidence_pct=conf_pct, pattern=setup_type,
+            asset=asset, direction=signal, confidence=conf_label, confidence_pct=conf_pct,
+            approach_type=approach_type, pattern=setup_type,
             level_name=s.get("level_name", ""), level_price=s.get("level_price", 0),
             entry=entry, stop=stop, tp1=tp1, tp2=tp2, rr=rr, option_type=option_type, strike=strike,
             expiry_date=expiry_date, dte=dte, size=size, est_premium_lo=est_premium_lo,
@@ -317,7 +332,7 @@ def _calc_atr(candles: list, period: int = 14) -> float:
 
 TOOL_DEFINITIONS = [
     # Primary tool — final decision (trade fields auto-filled from Brief context)
-    {"type": "function", "function": {"name": "send_signal", "description": "Your verdict. Trade fields (entry/stop/options) are auto-filled from the Brief. You provide only the decision.", "parameters": {"type": "object", "properties": {"signal": {"type": "string", "enum": ["LONG","SHORT","WAIT"]}, "confidence": {"type": "integer", "description": "0-100. 80+=HIGH, 50-79=MEDIUM, <50=LOW"}, "narrative": {"type": "string", "description": "1-2 sentence thesis"}, "reasoning": {"type": "string", "description": "Why Devil's Advocate failed (LONG/SHORT) or won (WAIT)"}, "invalidation": {"type": "string", "description": "Exact exit condition, e.g. '1m close below POC $639.50'. Use 'N/A' for WAIT."}, "wait_for": {"type": "string", "description": "WAIT only: exact condition to re-engage"}}, "required": ["signal","confidence","narrative","reasoning","invalidation"]}}},
+    {"type": "function", "function": {"name": "send_signal", "description": "Your verdict. Trade fields (entry/stop/options) are auto-filled from the Brief. You provide only the decision.", "parameters": {"type": "object", "properties": {"signal": {"type": "string", "enum": ["LONG","SHORT","WAIT"]}, "confidence": {"type": "integer", "description": "0-100. 80+=HIGH, 50-79=MEDIUM, <50=LOW"}, "narrative": {"type": "string", "description": "1-2 sentence thesis"}, "reasoning": {"type": "string", "description": "What the tape showed you (LONG/SHORT) or why you passed (WAIT)"}, "invalidation": {"type": "string", "description": "Exact exit condition, e.g. '1m close below POC $639.50'. Use 'N/A' for WAIT."}, "wait_for": {"type": "string", "description": "WAIT only: exact condition to re-engage"}}, "required": ["signal","confidence","narrative","reasoning","invalidation"]}}},
     # Deep-dive tools — use only if the Brief + Verification Data raises questions
     {"type": "function", "function": {"name": "get_candles", "description": "Get candles for a specific timeframe (1m/5m/15m/daily).", "parameters": {"type": "object", "properties": {"asset": {"type": "string", "enum": ASSETS}, "timeframe": {"type": "string", "enum": ["1m","5m","15m","daily"]}, "count": {"type": "integer", "default": 10}}, "required": ["asset","timeframe"]}}},
     {"type": "function", "function": {"name": "get_cvd", "description": "Detailed CVD timeline, delta, bias, divergence detection.", "parameters": {"type": "object", "properties": {"asset": {"type": "string", "enum": ASSETS}, "minutes": {"type": "integer", "default": 15}}, "required": ["asset"]}}},

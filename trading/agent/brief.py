@@ -17,6 +17,8 @@ def build_brief(
     session_name: str, session_quality: int, minutes_to_cutoff: int,
     tests_today: int, zone_context: str = "",
     verification_data: str = "", strength: str = "",
+    approach_type: str = "", approach_confidence_pts: int = 0,
+    cvd_quarantine: bool = False,
 ) -> str:
     now = now_et()
     now_str = now.strftime("%I:%M %p ET")
@@ -32,6 +34,40 @@ def build_brief(
     if day_context.gap_pct != 0:
         lines.append(f"  Gap: {day_context.gap_type} {day_context.gap_pct:+.2f}%")
 
+    # Macro status
+    from ..data.calendar import is_macro_halt
+    macro_halted, macro_reason = is_macro_halt(now)
+    lines += [
+        "",
+        "MACRO STATUS:",
+        f"  {'HALTED — ' + macro_reason if macro_halted else 'CLEAR'}",
+    ]
+
+    # Earnings status
+    from ..data.calendar import is_earnings_within_hold
+    earn_blocked, earn_reason = is_earnings_within_hold(asset)
+    lines += [
+        "",
+        "EARNINGS STATUS:",
+        f"  {'BLOCKED — ' + earn_reason if earn_blocked else 'CLEAR'}",
+    ]
+
+    # CVD quality
+    cvd_quality = "ESTIMATED" if cvd_quarantine else "LIVE"
+    lines += [
+        "",
+        "CVD QUALITY:",
+        f"  {cvd_quality}",
+    ]
+
+    # Approach context
+    if approach_type:
+        lines += [
+            "",
+            "APPROACH CONTEXT:",
+            f"  Type: {approach_type} | Confidence pts: {approach_confidence_pts:+d}",
+        ]
+
     # VIX + Options — pre-computed so agent doesn't need to call get_options_context
     if vix < 15: vl = "CALM"
     elif vix < 20: vl = "NORMAL"
@@ -46,17 +82,14 @@ def build_brief(
     elif vix < 30: env, size, inst = "HIGH", "HALF", "debit spread"
     else: env, size, inst = "VERY HIGH", "QUARTER", "spread only"
 
-    from ..core.asset_registry import get_config, has_daily_expiry
+    from ..core.asset_registry import get_config
     cfg = get_config(asset)
     minor = cfg["round_interval_minor"]
     atm_strike = round(round(current_price / minor) * minor, 2) if current_price > 0 else 0
 
     hour = now.hour + now.minute / 60.0
-    daily_exp = has_daily_expiry(asset)
-    if hour < 11: dte = 0 if daily_exp and now.weekday() == 4 else 1
-    elif hour < 13: dte = 1 if daily_exp else 2
-    elif hour < 14.5: dte = 0 if daily_exp else 1
-    else: dte = 0
+    from ..context.options_context import get_expiry
+    dte, _expiry_str, _ = get_expiry(asset)
     exp_dt = now + timedelta(days=dte)
 
     daily_move = (current_price * (vix / 100)) / math.sqrt(252) if current_price > 0 and vix > 0 else 0

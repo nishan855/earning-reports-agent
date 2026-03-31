@@ -1,3 +1,5 @@
+import asyncio
+
 from ..models import CVDPoint, Candle
 from ..context.sim_clock import now_et
 import pytz
@@ -30,6 +32,10 @@ class AssetCVDEngine:
         self._bar_volume: float = 0.0
         self._bar_close: float = 0.0
         self._last_price: float = 0.0
+        # v2.1 additions
+        self._lock = asyncio.Lock()
+        self._estimated: bool = False  # True when CVD reconstructed from bars
+        self._cvd_history: list = []   # list of abs(cvd_turn) values for rolling avg
 
     def process_trade(self, price: float, volume: float) -> float:
         """Process a tick — accumulates volume for the current bar.
@@ -118,6 +124,31 @@ class AssetCVDEngine:
         self._last_price = bar.c
         return self._cvd
 
+    async def process_trade_async(self, price: float, volume: float):
+        """Thread-safe version for async context."""
+        async with self._lock:
+            self.process_trade(price, volume)
+
+    def set_estimated(self, value: bool):
+        self._estimated = value
+
+    @property
+    def is_estimated(self) -> bool:
+        return self._estimated
+
+    def rolling_avg_cvd_turn(self, window: int = 10) -> float:
+        """Rolling average of abs(cvd_turn) over last N turns."""
+        sample = self._cvd_history[-window:]
+        if not sample:
+            return 1.0
+        return sum(abs(v) for v in sample) / len(sample)
+
+    def record_cvd_turn(self, turn: float):
+        """Call after each candle close to build rolling history."""
+        self._cvd_history.append(turn)
+        if len(self._cvd_history) > 200:  # cap history
+            self._cvd_history = self._cvd_history[-200:]
+
     def reset(self):
         self._cvd = 0.0
         self._session_date = ""
@@ -129,6 +160,8 @@ class AssetCVDEngine:
         self._bar_volume = 0.0
         self._bar_close = 0.0
         self._last_price = 0.0
+        self._estimated = False
+        self._cvd_history = []
 
     def get_history(self, minutes: int = 30) -> list[CVDPoint]:
         return self._history[-minutes:]

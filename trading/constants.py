@@ -1,5 +1,5 @@
 # Assets
-ASSETS = ["SPY", "QQQ", "AAPL", "NVDA", "TSLA", "MSFT", "META", "AMZN"]
+ASSETS = ["SPY", "QQQ", "AAPL", "NVDA", "TSLA", "MSFT", "META", "AMZN", "JPM", "XLE", "GLD", "BA"]
 
 # Market hours ET
 MARKET_OPEN_HOUR = 9
@@ -8,13 +8,13 @@ OR_LOCK_HOUR = 10
 OR_LOCK_MIN = 0
 OR_DURATION_MIN = 30
 CUTOFF_HOUR = 15
-CUTOFF_MIN = 30
+CUTOFF_MIN = 15
 MARKET_CLOSE_HOUR = 16
 
 # Signal detection
 PROXIMITY_PCT = 0.005
 CONFLUENCE_DIST_PCT = 0.003
-MIN_LEVEL_SCORE = 6
+MIN_LEVEL_SCORE = 7
 MAX_RETEST_CANDLES = 15
 RETEST_PROXIMITY = 0.003
 
@@ -35,8 +35,8 @@ ASSET_COOLDOWN_SEC = 300
 LEVEL_LOCK_DAILY = True
 
 # Risk
-MIN_RR = 1.5
-MAX_SIGNALS_PER_ASSET = 6
+MIN_RR = 2.5
+MAX_SIGNALS_PER_ASSET = 3
 
 # VIX thresholds
 VIX_HARD_BLOCK = 35
@@ -44,17 +44,19 @@ VIX_REDUCE_HALF = 25
 VIX_REDUCE_QUARTER = 30
 VIX_SPREADS_ONLY = 30
 
-# Level scores
+# Level scores (V3.1 — re-weighted for institutional reality)
 SCORE_52W = 10
 SCORE_MONTHLY = 9
+SCORE_PD_POC = 9        # Previous day POC — highest institutional weight
 SCORE_WEEKLY = 8
 SCORE_PDH_PDL = 8
+SCORE_PD_VAH_VAL = 8   # Previous day VAH/VAL — settled institutional boundaries
 SCORE_PDC = 7
 SCORE_ORH_ORL = 7
-SCORE_POC = 6
-SCORE_VAH_VAL = 6
+SCORE_POC = 7           # Today's developing POC (was 6)
+SCORE_VAH_VAL = 6       # Today's developing VAH/VAL — passes 7 only with confluence
 SCORE_HVN = 5
-SCORE_PMH_PML = 5
+SCORE_PMH_PML = 5       # Fails 7 unless HVN-aligned (5*1.5=7.5) or confluence
 SCORE_VWAP = 4
 SCORE_ROUND_10 = 4
 SCORE_ROUND_5 = 3

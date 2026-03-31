@@ -6,6 +6,7 @@ def format_telegram(signal: Signal) -> str:
         return ""
 
     icon = "🟢" if signal.direction == "LONG" else "🔴"
+    pct = f" ({signal.confidence_pct}%)" if signal.confidence_pct else ""
     conf = "⭐⭐⭐" if signal.confidence == "HIGH" else "⭐⭐" if signal.confidence == "MEDIUM" else "⭐"
 
     opt = ""
@@ -20,7 +21,7 @@ def format_telegram(signal: Signal) -> str:
     warn = f"\n⚠️ {signal.warnings}" if signal.warnings else ""
 
     return (
-        f"{icon} *{signal.asset} {signal.direction}* — {signal.confidence} {conf}\n"
+        f"{icon} *{signal.asset} {signal.direction}* — {signal.confidence}{pct} {conf}\n"
         f"_{signal.fired_at} ET | {signal.session}_\n\n"
         f"📋 *SETUP*\n{signal.pattern.replace('_', ' ')}\n"
         f"Level: {signal.level_name} ${signal.level_price:.2f}\n"

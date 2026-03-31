@@ -30,9 +30,26 @@ class GateSystem:
     def check_all(self, asset: str, level_score: int, volume_ratio: float, vix: float, direction: str, day_bias: str) -> tuple[bool, str]:
         self._check_daily_reset()
 
+        # Gate 0a: Earnings check
+        from ..data.calendar import is_earnings_within_hold
+        earned_blocked, earn_reason = is_earnings_within_hold(asset)
+        if earned_blocked:
+            return False, earn_reason
+
+        # Gate 0b: Holiday
+        from ..data.calendar import is_market_holiday
+        if is_market_holiday():
+            return False, "Market holiday"
+
+        # Gate 0c: Macro event halt
+        from ..data.calendar import is_macro_halt
+        macro_halted, macro_reason = is_macro_halt()
+        if macro_halted:
+            return False, f"Macro halt: {macro_reason}"
+
         # Signal hours — hard rule (agent can't override clock)
         if not self.sim_mode and not is_signal_allowed():
-            return False, "Outside signal hours (10am-3:30pm)"
+            return False, "Outside signal hours (10am-3:15pm)"
 
         # VIX hard block — only at extreme (35+), agent handles 25-35
         if vix >= VIX_HARD_BLOCK:

@@ -1,18 +1,72 @@
 import pytz
 from datetime import datetime
 
-from ..models import Level, Candle
+from ..models import Level, Candle, VolumeProfile
 from ..constants import (
     SCORE_52W, SCORE_MONTHLY, SCORE_WEEKLY,
     SCORE_PDH_PDL, SCORE_PDC, SCORE_ORH_ORL,
     SCORE_POC, SCORE_VAH_VAL, SCORE_HVN,
     SCORE_VWAP, SCORE_ROUND_10, SCORE_ROUND_5,
-    SCORE_PMH_PML,
+    SCORE_PMH_PML, SCORE_PD_POC, SCORE_PD_VAH_VAL,
 )
 from ..core.asset_registry import get_config
 from .scorer import apply_confluence
 
 ET = pytz.timezone("America/New_York")
+
+# Minimum score threshold for detection (levels scoring below this are filtered)
+MIN_LEVEL_SCORE_FOR_DETECTION = 7
+
+# Confluence constants
+CONFLUENCE_DISTANCE_PCT = 0.0030  # 0.30%
+CONFLUENCE_BONUS = 2
+CONFLUENCE_CAP = 12
+
+
+def apply_volume_multiplier(level: Level, vol_profile: object, prior_day_vp: object) -> int:
+    """V3.1 Volume Node Alignment multiplier.
+    Maps static levels against the relevant volume profile:
+    - PDH/PDL/PMH/PML → prior day's profile
+    - ORH/ORL → today's developing profile
+    If level sits in HVN → 1.5x, in LVN → 0.5x, else 1.0x.
+    """
+    # Choose the right profile for this level type
+    if level.source in ("PD", "PM"):
+        vp = prior_day_vp
+    elif level.source == "OR":
+        vp = vol_profile
+    else:
+        return level.score  # no multiplier for 52W, MONTHLY, WEEKLY, VOLUME, VWAP, ZONE
+
+    if not vp:
+        return level.score
+
+    alignment = _check_volume_alignment(level.price, vp)
+    if alignment == "HVN":
+        return max(1, round(level.score * 1.5))
+    elif alignment == "LVN":
+        return max(1, round(level.score * 0.5))
+    return level.score
+
+
+def _check_volume_alignment(price: float, vp) -> str:
+    """Check if a price sits in an HVN, LVN, or neither."""
+    # Check HVN — price within 0.1% of any high volume node or POC
+    hvn_prices = list(getattr(vp, 'hvn_list', []) or [])
+    if hasattr(vp, 'poc') and vp.poc > 0:
+        hvn_prices.append(vp.poc)
+    for hvn in hvn_prices:
+        if hvn > 0 and abs(price - hvn) / price <= 0.001:
+            return "HVN"
+
+    # Check LVN — price falls inside a low volume zone
+    for lvn in (getattr(vp, 'lvn_zones', []) or []):
+        low = lvn.get("low", 0) if isinstance(lvn, dict) else getattr(lvn, 'low', 0)
+        high = lvn.get("high", 0) if isinstance(lvn, dict) else getattr(lvn, 'high', 0)
+        if low <= price <= high:
+            return "LVN"
+
+    return "NEUTRAL"
 
 
 def build_levels(
@@ -20,6 +74,7 @@ def build_levels(
     c5m_recent: list[Candle], current_price: float, vwap: float,
     or_high: float, or_low: float, or_complete: bool,
     vol_profile: object, zones: list, gap_pct: float = 0.0,
+    prior_day_vp: VolumeProfile | None = None,
 ) -> list[Level]:
     cfg = get_config(asset)
     levels = []
@@ -65,13 +120,23 @@ def build_levels(
         pos = "above" if current_price > vwap else "below"
         levels.append(Level(name="VWAP", price=vwap, score=SCORE_VWAP, type="dynamic", source="VWAP", confidence="HIGH", description=f"VWAP ${vwap:.2f} — price {pos}."))
 
+    # Prior Day Volume Profile — stable institutional levels (V3.1)
+    if prior_day_vp:
+        if prior_day_vp.poc > 0:
+            levels.append(Level(name="pdPOC", price=prior_day_vp.poc, score=SCORE_PD_POC, type="pivot", source="PD_VOLUME", confidence="HIGH", description=f"Prior Day POC ${prior_day_vp.poc:.2f} — settled institutional magnet."))
+        if prior_day_vp.vah > 0:
+            levels.append(Level(name="pdVAH", price=prior_day_vp.vah, score=SCORE_PD_VAH_VAL, type="resistance", source="PD_VOLUME", confidence="HIGH", description=f"Prior Day VAH ${prior_day_vp.vah:.2f} — settled value area boundary."))
+        if prior_day_vp.val > 0:
+            levels.append(Level(name="pdVAL", price=prior_day_vp.val, score=SCORE_PD_VAH_VAL, type="support", source="PD_VOLUME", confidence="HIGH", description=f"Prior Day VAL ${prior_day_vp.val:.2f} — settled value area boundary."))
+
+    # Today's developing Volume Profile
     if vol_profile:
         if vol_profile.poc > 0:
-            levels.append(Level(name="POC", price=vol_profile.poc, score=SCORE_POC, type="pivot", source="VOLUME", confidence="HIGH", description=f"Point of Control ${vol_profile.poc:.2f}."))
+            levels.append(Level(name="dPOC", price=vol_profile.poc, score=SCORE_POC, type="pivot", source="VOLUME", confidence="HIGH", description=f"Developing POC ${vol_profile.poc:.2f}."))
         if vol_profile.vah > 0:
-            levels.append(Level(name="VAH", price=vol_profile.vah, score=SCORE_VAH_VAL, type="resistance", source="VOLUME", confidence="HIGH", description=f"Value Area High ${vol_profile.vah:.2f}."))
+            levels.append(Level(name="dVAH", price=vol_profile.vah, score=SCORE_VAH_VAL, type="resistance", source="VOLUME", confidence="HIGH", description=f"Developing VAH ${vol_profile.vah:.2f}."))
         if vol_profile.val > 0:
-            levels.append(Level(name="VAL", price=vol_profile.val, score=SCORE_VAH_VAL, type="support", source="VOLUME", confidence="HIGH", description=f"Value Area Low ${vol_profile.val:.2f}."))
+            levels.append(Level(name="dVAL", price=vol_profile.val, score=SCORE_VAH_VAL, type="support", source="VOLUME", confidence="HIGH", description=f"Developing VAL ${vol_profile.val:.2f}."))
         for i, hvn in enumerate(vol_profile.hvn_list[:3]):
             levels.append(Level(name=f"HVN{i+1}", price=hvn, score=SCORE_HVN, type="pivot", source="VOLUME", confidence="MEDIUM", description=f"High volume node ${hvn:.2f}."))
 
@@ -85,7 +150,13 @@ def build_levels(
 
     levels = [l for l in levels if l.price > 0]
     if current_price > 0:
-        levels = [l for l in levels if abs(l.price - current_price) / current_price <= 0.05 or l.source == "52W"]
+        levels = [l for l in levels if abs(l.price - current_price) / current_price <= 0.05 or l.source in ("52W", "PD_VOLUME")]
+
+    # V3.1: Volume Node Alignment — adjust scores for PDH/PDL/ORH/ORL/PMH/PML
+    for lvl in levels:
+        if lvl.source in ("PD", "PM", "OR"):
+            lvl.score = apply_volume_multiplier(lvl, vol_profile, prior_day_vp)
+
     levels = apply_confluence(levels)
     levels.sort(key=lambda l: l.price, reverse=True)
     return levels

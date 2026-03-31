@@ -67,6 +67,35 @@ def compute_volume_profile(asset: str, candles_today: list[Candle], atr: float =
     )
 
 
+def compute_prior_day_profile(asset: str, all_1m_bars: list[Candle], atr: float = 0.0) -> VolumeProfile | None:
+    """Compute volume profile from yesterday's market hours bars (9:30-16:00)."""
+    if not all_1m_bars:
+        return None
+
+    # Find the last bar's date, then get the previous trading day's bars
+    last_dt = datetime.fromtimestamp(all_1m_bars[-1].t / 1000, tz=ET)
+    today_open = last_dt.replace(hour=9, minute=30, second=0, microsecond=0)
+    today_start_ms = int(today_open.timestamp() * 1000)
+
+    # Get all bars before today
+    prior_bars = [c for c in all_1m_bars if c.t < today_start_ms]
+    if len(prior_bars) < 30:
+        return None
+
+    # Find the most recent prior day's bars (last trading day before today)
+    last_prior_dt = datetime.fromtimestamp(prior_bars[-1].t / 1000, tz=ET)
+    prior_day_open = last_prior_dt.replace(hour=9, minute=30, second=0, microsecond=0)
+    prior_day_start_ms = int(prior_day_open.timestamp() * 1000)
+    prior_day_close = last_prior_dt.replace(hour=16, minute=0, second=0, microsecond=0)
+    prior_day_end_ms = int(prior_day_close.timestamp() * 1000)
+
+    prior_day_bars = [c for c in prior_bars if prior_day_start_ms <= c.t <= prior_day_end_ms]
+    if len(prior_day_bars) < 30:
+        return None
+
+    return compute_volume_profile(asset, prior_day_bars, atr=atr)
+
+
 def _round_to_bucket(price: float, bucket_size: float) -> float:
     return round(round(price / bucket_size) * bucket_size, 4)
 
