@@ -64,6 +64,7 @@ class MultiEngine:
         self._ws_disconnect_count: int = 0
         self._last_vwap: dict = {}
         self._prior_day_vp: dict = {}  # V3.1: prior day volume profile per asset
+        self._pending_confirm: dict = {a: None for a in ASSETS}  # V3.3: confirmation candle queue
         # Register 1m/5m close callbacks on candle store
         for asset in ASSETS:
             self._candles.on_1m_close(asset, self.on_1m_close)
@@ -706,8 +707,8 @@ class MultiEngine:
 
         # Heavy compute (levels + volume profile) moved to on_5m_close
 
-        # V3.2: BREAKOUT_RETEST and FAILED_BREAKOUT removed — not in V3.0 spec.
-        # Tracker still used for is_locked() duplicate prevention.
+        # V3.3: Confirmation candle — check pending signals from previous bar
+        await self._check_pending_confirmation(asset, last)
 
         if not self._investigating[asset]:
             await self._check_liquidity_grabs(asset, last, cvd_now, cvd_prev, avg_vol)
@@ -747,14 +748,14 @@ class MultiEngine:
                     if passed:
                         approach = result.get("approach")
                         self._log(f"{asset} FAILED_AUCTION_MAJOR {fa_dir} at {level.name} ${level.price:.2f}")
-                        self._tracker._locked.add(self._tracker._key(asset, level.name))
-                        await self._fire_agent(
-                            asset, "FAILED_AUCTION_MAJOR", fa_dir, level,
-                            candle, vol_ratio, cvd_turn,
-                            approach_type=approach.type if approach else "",
-                            approach_confidence_pts=approach.confidence_pts if approach else 0,
-                            cvd_quarantine=cvd_quarantine,
-                        )
+                        self._queue_pending(asset, {
+                            "pattern": "FAILED_AUCTION_MAJOR", "direction": fa_dir,
+                            "level": level, "candle": candle,
+                            "vol_ratio": vol_ratio, "cvd_change": cvd_turn,
+                            "approach_type": approach.type if approach else "",
+                            "approach_confidence_pts": approach.confidence_pts if approach else 0,
+                            "cvd_quarantine": cvd_quarantine,
+                        })
                         break
             except Exception:
                 pass
@@ -845,12 +846,14 @@ class MultiEngine:
                         if passed:
                             approach = result.get("approach")
                             self._log(f"{asset} FAILED_AUCTION_VAR {fa_dir} at {vp_label} VAH/VAL target=POC ${s3a_poc:.2f}")
-                            await self._fire_agent(
-                                asset, "FAILED_AUCTION_VAR", fa_dir, var_level, last, vol_ratio, cvd_turn,
-                                approach_type=approach.type if approach else "",
-                                approach_confidence_pts=approach.confidence_pts if approach else 0,
-                                cvd_quarantine=cvd_quarantine,
-                            )
+                            self._queue_pending(asset, {
+                                "pattern": "FAILED_AUCTION_VAR", "direction": fa_dir,
+                                "level": var_level, "candle": last,
+                                "vol_ratio": vol_ratio, "cvd_change": cvd_turn,
+                                "approach_type": approach.type if approach else "",
+                                "approach_confidence_pts": approach.confidence_pts if approach else 0,
+                                "cvd_quarantine": cvd_quarantine,
+                            })
                             break
                 except Exception:
                     pass
@@ -901,13 +904,14 @@ class MultiEngine:
                         if passed:
                             approach = result.get("approach")
                             self._log(f"{asset} FAILED_AUCTION_MAJOR {fa_dir} at {level.name} ${level.price:.2f}")
-                            self._tracker._locked.add(self._tracker._key(asset, level.name))
-                            await self._fire_agent(
-                                asset, "FAILED_AUCTION_MAJOR", fa_dir, level, last, vol_ratio, cvd_turn,
-                                approach_type=approach.type if approach else "",
-                                approach_confidence_pts=approach.confidence_pts if approach else 0,
-                                cvd_quarantine=cvd_quarantine,
-                            )
+                            self._queue_pending(asset, {
+                                "pattern": "FAILED_AUCTION_MAJOR", "direction": fa_dir,
+                                "level": level, "candle": last,
+                                "vol_ratio": vol_ratio, "cvd_change": cvd_turn,
+                                "approach_type": approach.type if approach else "",
+                                "approach_confidence_pts": approach.confidence_pts if approach else 0,
+                                "cvd_quarantine": cvd_quarantine,
+                            })
                             break
                 except Exception:
                     pass
@@ -936,17 +940,65 @@ class MultiEngine:
                     passed, _ = self._gates.check_all(asset, level.score, vol_ratio, self._vix, grab_dir, bias)
                     if passed:
                         self._log(f"{asset} LIQUIDITY_GRAB {grab_dir} at {level.name} ${level.price:.2f}")
-                        self._tracker._locked.add(self._tracker._key(asset, level.name))
                         approach = result.get("approach")
-                        await self._fire_agent(
-                            asset, "LIQUIDITY_GRAB", grab_dir, level, candle, vol_ratio, cvd_change,
-                            approach_type=approach.type if approach else "",
-                            approach_confidence_pts=approach.confidence_pts if approach else 0,
-                            cvd_quarantine=cvd_quarantine,
-                        )
+                        self._queue_pending(asset, {
+                            "pattern": "LIQUIDITY_GRAB", "direction": grab_dir,
+                            "level": level, "candle": candle,
+                            "vol_ratio": vol_ratio, "cvd_change": cvd_change,
+                            "approach_type": approach.type if approach else "",
+                            "approach_confidence_pts": approach.confidence_pts if approach else 0,
+                            "cvd_quarantine": cvd_quarantine,
+                        })
                         break
             except Exception:
                 pass
+
+    def _queue_pending(self, asset: str, pending: dict):
+        """V3.3: Queue a reversal detection for confirmation on the next 1m bar."""
+        self._pending_confirm[asset] = pending
+        self._log(f"{asset} PENDING: {pending['pattern']} {pending['direction']} at {pending['level'].name} — awaiting confirmation candle")
+
+    async def _check_pending_confirmation(self, asset: str, candle):
+        """V3.3: Check if the confirmation candle validates the pending reversal."""
+        pending = self._pending_confirm.get(asset)
+        if not pending:
+            return
+        self._pending_confirm[asset] = None  # clear regardless of outcome
+
+        if self._investigating[asset]:
+            self._log(f"{asset} PENDING DROPPED: {pending['pattern']} — asset busy")
+            return
+
+        direction = pending["direction"]
+        level = pending["level"]
+        trigger_candle = pending["candle"]
+
+        # Confirmation: next candle must close in the reversal direction
+        # and must NOT break back through the level (invalidation)
+        if direction == "BULLISH":
+            confirmed = candle.c > candle.o  # bullish close
+            invalidated = candle.c < level.price  # closed back below level
+        else:
+            confirmed = candle.c < candle.o  # bearish close
+            invalidated = candle.c > level.price  # closed back above level
+
+        if invalidated:
+            self._log(f"{asset} CONFIRM FAILED: {pending['pattern']} {direction} at {level.name} — price broke back through level")
+            return
+
+        if not confirmed:
+            self._log(f"{asset} CONFIRM FAILED: {pending['pattern']} {direction} at {level.name} — no directional follow-through")
+            return
+
+        self._log(f"{asset} CONFIRMED: {pending['pattern']} {direction} at {level.name} — firing agent")
+        self._tracker._locked.add(self._tracker._key(asset, level.name))
+        await self._fire_agent(
+            asset, pending["pattern"], direction, level,
+            trigger_candle, pending["vol_ratio"], pending["cvd_change"],
+            approach_type=pending.get("approach_type", ""),
+            approach_confidence_pts=pending.get("approach_confidence_pts", 0),
+            cvd_quarantine=pending.get("cvd_quarantine", False),
+        )
 
     async def _fire_agent(self, asset, pattern, direction, level, candle, vol_ratio, cvd_change, retest_candle=None, cvd_at_retest=0.0, cvd_turned=False, strength="", approach_type="", approach_confidence_pts=0, cvd_quarantine=False):
         if self._investigating[asset]:
