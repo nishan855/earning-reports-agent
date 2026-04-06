@@ -49,10 +49,12 @@ def detect_failed_auction(
 
 def _detect_var(
     candles, level, atr, rolling_avg_vol, cvd_turn, rolling_avg_cvd,
-    vah, val, poc, session_hour, cvd_quarantine, day_bias
+    vah, val, poc, session_hour, cvd_quarantine, day_bias,
+    bars_1m_inside=None, atr_1m=0.0, rolling_avg_vol_1m=0.0,
 ) -> dict | None:
-    """Setup 3A: Value Area Rejection. After 11:00 AM.
-    V3.0: Trigger on location + shape. Grade with scorer."""
+    """Setup 3A: Value Area Rejection — V4.0 5m detection.
+    After 11:00 AM. Price pushed outside value area and failed.
+    Target is always POC. Low volume outside = confirmation."""
     if session_hour < 11.0:
         return None
     if not vah or not val or not poc:
@@ -61,13 +63,18 @@ def _detect_var(
         return None
 
     candle = candles[-1]
+
+    # Doji filter — bar must have directional body
+    candle_body = abs(candle.c - candle.o)
+    candle_range = candle.h - candle.l
+    if candle_range > 0 and candle_body / candle_range < 0.12:
+        return None  # doji — no directional conviction for VAR
+
     proximity = atr * 0.2
 
-    # ── PHASE 1: TRIGGER — price interacts with VAH/VAL boundary ──
-    # Classic: outside → closes back inside
+    # ── PHASE 1: TRIGGER — 5m bar interacts with VAH/VAL boundary ──
     outside_above = candle.h > vah and candle.c < vah
     outside_below = candle.l < val and candle.c > val
-    # Inside-out: approaches boundary from inside with rejection wick
     body = abs(candle.c - candle.o) or 0.001
     inside_touch_vah = (candle.h >= vah - proximity and candle.c < vah
                         and candle.c < candle.o
@@ -78,70 +85,120 @@ def _detect_var(
 
     if outside_above or inside_touch_vah:
         direction = "BEARISH"
+        wick_extreme = candle.h
+        var_type = "outside VAH" if outside_above else "inside touch VAH"
     elif outside_below or inside_touch_val:
         direction = "BULLISH"
+        wick_extreme = candle.l
+        var_type = "outside VAL" if outside_below else "inside touch VAL"
     else:
         return None
 
-    # ── PHASE 2: GRADE — volume, CVD, approach scored ──
+    # Wick rejection measurement
+    bar_range = candle.h - candle.l
+    if direction == "BEARISH":
+        wick_past = candle.h - max(candle.o, candle.c)
+    else:
+        wick_past = min(candle.o, candle.c) - candle.l
+    wick_rejection = wick_past / bar_range if bar_range > 0 else 0
+
+    # ── PHASE 2: GRADE ──
     vol_ratio = rolling_vol_ratio(candle, rolling_avg_vol)
     cvd_ratio = cvd_turn_magnitude(cvd_turn, rolling_avg_cvd)
-    disp = displacement_ratio(candle)
 
     approach = classify_approach(
         candles[-6:-1] if len(candles) >= 6 else candles[:-1],
         level.price, atr, rolling_avg_vol,
     )
 
+    from .metrics import get_5m_trend
+    trend_5m = get_5m_trend(candles) if len(candles) >= 4 else "NEUTRAL"
+
+    # 1m enrichment
+    enrichment = {"absorption": 0, "vol_cluster": 0, "cvd_micro": 0, "total": 0}
+    if bars_1m_inside and len(bars_1m_inside) >= 2:
+        from ..detection.liquidity_grab import score_1m_enrichment
+        enrichment = score_1m_enrichment(
+            bars_1m_inside, direction, level.price,
+            atr_1m if atr_1m > 0 else atr / 2.2,
+            rolling_avg_vol_1m if rolling_avg_vol_1m > 0 else rolling_avg_vol / 5,
+        )
+
     conf = score_signal(
         level=level,
         vol_ratio=vol_ratio,
-        displacement=disp,
+        displacement=wick_rejection,
         wick_ratio=wick_body_ratio(candle, direction),
         cvd_ratio=cvd_ratio,
         cvd_divergence=False,
         approach=approach,
         cvd_quarantine=cvd_quarantine,
         day_bias=day_bias,
+        trend_5m=trend_5m,
+        signal_dir=direction,
+        setup_type="FAILED_AUCTION_VAR",
+        tests_today=level.tests_today,
     )
 
-    # ── PHASE 3: FINAL GATE ──
-    if conf.score < 50:
+    # Add 1m enrichment bonus
+    enrichment_bonus = enrichment.get("total", 0)
+    conf.score = min(100, conf.score + enrichment_bonus)
+    if conf.score >= 75:
+        conf.label = "HIGH"
+    elif conf.score >= conf.threshold:
+        conf.label = "MEDIUM"
+
+    # ── PHASE 3: GATE ──
+    if conf.score < conf.threshold:
         return None
 
     return {
-        "setup":      "FAILED_AUCTION_VAR",
-        "direction":  direction,
-        "entry":      None,
-        "target":     poc,
-        "approach":   approach,
-        "confidence": conf,
-        "vol_ratio":  vol_ratio,
-        "cvd_ratio":  cvd_ratio,
-        "details":    (
-            f"{'outside VAH' if outside_above else 'outside VAL' if outside_below else 'inside touch'} "
-            f"target=POC ${poc:.2f} vol={vol_ratio:.1f}x cvd={cvd_ratio:.1f}x conf={conf.score}"
+        "setup":          "FAILED_AUCTION_VAR",
+        "direction":      direction,
+        "entry":          None,
+        "target":         poc,
+        "approach":       approach,
+        "confidence":     conf,
+        "vol_ratio":      vol_ratio,
+        "cvd_ratio":      cvd_ratio,
+        "wick_extreme":   wick_extreme,
+        "wick_past":      wick_past,
+        "wick_rejection": wick_rejection,
+        "var_type":       var_type,
+        "trend_5m":       trend_5m,
+        "trend_pts":      conf.components.get("trend_5m", 0),
+        "enrichment":     enrichment,
+        "details":        (
+            f"5m {var_type} rejection={wick_rejection:.0%} "
+            f"target=POC ${poc:.2f} vol={vol_ratio:.1f}x cvd={cvd_ratio:.1f}x "
+            f"trend={trend_5m} enrich=+{enrichment_bonus} conf={conf.score}"
         ),
     }
 
 
 def _detect_major_level(
-    candles_5m, level, atr, rolling_avg_vol_1m, cvd_turn, rolling_avg_cvd,
+    candles_5m, level, atr, rolling_avg_vol, cvd_turn, rolling_avg_cvd,
     cvd_quarantine, day_bias, candles_1m=None,
+    bars_1m_inside=None, atr_1m=0.0, rolling_avg_vol_1m=0.0,
 ) -> dict | None:
-    """Setup 3B: Major Level Rejection — 5m Spotter / 1m Sniper.
-    V3.0: Trigger on proximity + wick shape. Grade with scorer.
+    """Setup 3B: Major Level Rejection — V4.0 5m detection.
+    Trigger on 5m bar: proximity + wick/body >= 2.0.
+    Uses 1m enrichment for absorption scoring.
     Level score >= 8 required."""
     if level.score < 8:
         return None
     if len(candles_5m) < 3:
         return None
 
-    # ── Determine trigger candles ──
-    trigger_candles = candles_1m if candles_1m and len(candles_1m) >= 3 else candles_5m
-    candle = trigger_candles[-1]
+    # ── PHASE 1: TRIGGER on 5m bar ──
+    candle = candles_5m[-1]
 
-    # ── PHASE 1: TRIGGER — proximity + wick shape ──
+    # Doji filter — bar must have directional body
+    candle_body = abs(candle.c - candle.o)
+    candle_range = candle.h - candle.l
+    if candle_range > 0 and candle_body / candle_range < 0.12:
+        return None  # doji — both wicks pass wick/body, no real rejection
+
     proximity = atr * 0.2
     near_as_resistance = candle.h >= level.price - proximity
     near_as_support = candle.l <= level.price + proximity
@@ -155,41 +212,70 @@ def _detect_major_level(
     upper_ratio = upper_wick / body
     lower_ratio = lower_wick / body
 
-    # Wick/body >= 2.0 on rejection side (strict shape requirement stays)
+    # Wick/body >= 2.0 on rejection side
     if near_as_resistance and candle.c < level.price and upper_ratio >= 2.0:
         direction = "BEARISH"
         wick_r = upper_ratio
+        wick_extreme = candle.h
     elif near_as_support and candle.c > level.price and lower_ratio >= 2.0:
         direction = "BULLISH"
         wick_r = lower_ratio
+        wick_extreme = candle.l
     else:
         return None
 
-    # ── PHASE 2: GRADE — volume, CVD, approach all scored ──
-    vol_ratio = rolling_vol_ratio(candle, rolling_avg_vol_1m)
+    # ── PHASE 2: GRADE on 5m ──
+    vol_ratio = rolling_vol_ratio(candle, rolling_avg_vol)
     cvd_ratio = cvd_turn_magnitude(cvd_turn, rolling_avg_cvd)
-    disp = displacement_ratio(candle)
+    bar_range = candle.h - candle.l
+    wick_rejection = (upper_wick if direction == "BEARISH" else lower_wick) / bar_range if bar_range > 0 else 0
 
-    # 5m approach context (the "spotter")
+    # 5m approach context
     approach = classify_approach(
         candles_5m[-6:-1] if len(candles_5m) >= 6 else candles_5m[:-1],
-        level.price, atr, rolling_avg_vol_1m,
+        level.price, atr, rolling_avg_vol,
     )
+
+    # 5m trend
+    from .metrics import get_5m_trend
+    trend_5m = get_5m_trend(candles_5m) if len(candles_5m) >= 4 else "NEUTRAL"
+
+    # 1m enrichment (reuse S1's function)
+    enrichment = {"absorption": 0, "vol_cluster": 0, "cvd_micro": 0, "total": 0}
+    if bars_1m_inside and len(bars_1m_inside) >= 2:
+        from ..detection.liquidity_grab import score_1m_enrichment
+        enrichment = score_1m_enrichment(
+            bars_1m_inside, direction, level.price,
+            atr_1m if atr_1m > 0 else atr / 2.2,
+            rolling_avg_vol_1m if rolling_avg_vol_1m > 0 else rolling_avg_vol / 5,
+        )
 
     conf = score_signal(
         level=level,
         vol_ratio=vol_ratio,
-        displacement=disp,
+        displacement=wick_rejection,
         wick_ratio=wick_r,
         cvd_ratio=cvd_ratio,
         cvd_divergence=False,
         approach=approach,
         cvd_quarantine=cvd_quarantine,
         day_bias=day_bias,
+        trend_5m=trend_5m,
+        signal_dir=direction,
+        setup_type="FAILED_AUCTION_MAJOR",
+        tests_today=level.tests_today,
     )
 
-    # ── PHASE 3: FINAL GATE ──
-    if conf.score < 50:
+    # Add 1m enrichment bonus
+    enrichment_bonus = enrichment.get("total", 0)
+    conf.score = min(100, conf.score + enrichment_bonus)
+    if conf.score >= 75:
+        conf.label = "HIGH"
+    elif conf.score >= conf.threshold:
+        conf.label = "MEDIUM"
+
+    # ── PHASE 3: GATE ──
+    if conf.score < conf.threshold:
         return None
 
     return {
@@ -201,9 +287,15 @@ def _detect_major_level(
         "confidence": conf,
         "vol_ratio":  vol_ratio,
         "cvd_ratio":  cvd_ratio,
+        "wick_extreme": wick_extreme,
         "wick_ratio": wick_r,
+        "wick_rejection": wick_rejection,
+        "trend_5m":   trend_5m,
+        "trend_pts":  conf.components.get("trend_5m", 0),
+        "enrichment": enrichment,
         "details":    (
-            f"wick/body={wick_r:.1f} vol={vol_ratio:.1f}x cvd={cvd_ratio:.1f}x "
-            f"approach={approach.type} conf={conf.score}"
+            f"5m wick/body={wick_r:.1f} rejection={wick_rejection:.0%} "
+            f"vol={vol_ratio:.1f}x cvd={cvd_ratio:.1f}x trend={trend_5m} "
+            f"enrich=+{enrichment_bonus} conf={conf.score}"
         ),
     }

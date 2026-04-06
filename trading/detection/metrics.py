@@ -39,9 +39,10 @@ def rolling_vol_ratio(candle: Candle, rolling_avg: float) -> float:
 
 
 def cvd_turn_magnitude(cvd_turn: float, rolling_avg_cvd: float) -> float:
-    """abs(cvd_turn) / rolling_avg(last_10_cvd_turns)"""
+    """abs(cvd_turn) / rolling_avg(last_10_cvd_turns)
+    Returns 1.0 (neutral) if no rolling history yet, not 0.0."""
     if rolling_avg_cvd <= 0:
-        return 0.0
+        return 1.0  # neutral baseline, not zero
     return abs(cvd_turn) / rolling_avg_cvd
 
 
@@ -70,6 +71,22 @@ def detect_fvg(candles: list) -> tuple:
         return True, mid, "BEARISH"
 
     return False, 0.0, ""
+
+
+def get_5m_trend(bars_5m: list, lookback: int = 4) -> str:
+    """Determine 5m trend direction from last 4 closed bars.
+    Returns: BEARISH | BULLISH | NEUTRAL
+    3 of 4 bars closing in same direction = trending."""
+    if len(bars_5m) < lookback:
+        return "NEUTRAL"
+    recent = bars_5m[-lookback:]
+    bullish_count = sum(1 for i in range(1, len(recent)) if recent[i].c > recent[i-1].c)
+    bearish_count = sum(1 for i in range(1, len(recent)) if recent[i].c < recent[i-1].c)
+    if bearish_count >= 3:
+        return "BEARISH"
+    elif bullish_count >= 3:
+        return "BULLISH"
+    return "NEUTRAL"
 
 
 def is_super_candle(

@@ -15,7 +15,7 @@ from ..levels.volume_profile import compute_prior_day_profile
 from ..levels.volume_profile import compute_volume_profile
 from ..levels.zones import detect_zones
 from ..detection.level_state import TrackerEngine
-from ..detection.liquidity_grab import detect_liquidity_grab
+from ..detection.liquidity_grab import detect_5m_sweep
 from ..detection.defense import detect_ob_defense
 from ..detection.approach import classify_approach
 from ..detection.metrics import is_super_candle
@@ -46,6 +46,7 @@ class MultiEngine:
         self._or_high: dict = {a: 0.0 for a in ASSETS}
         self._or_low: dict = {a: 0.0 for a in ASSETS}
         self._or_locked: dict = {a: False for a in ASSETS}
+        self._or_lock_ts: dict = {a: 0 for a in ASSETS}
         self._investigating: dict = {a: False for a in ASSETS}
         self._last_tick_time: dict = {a: 0.0 for a in ASSETS}
         self._tracker = TrackerEngine()
@@ -64,17 +65,17 @@ class MultiEngine:
         self._ws_disconnect_count: int = 0
         self._last_vwap: dict = {}
         self._prior_day_vp: dict = {}  # V3.1: prior day volume profile per asset
-        self._pending_confirm: dict = {a: None for a in ASSETS}  # V3.3: confirmation candle queue
+        self._pending_sweep: dict = {a: None for a in ASSETS}   # V4.0: 5m detection pending 1m momentum
+        self._last_session_date: str = ""  # tracks when daily reset last ran
         # Register 1m/5m close callbacks on candle store
         for asset in ASSETS:
             self._candles.on_1m_close(asset, self.on_1m_close)
             self._candles.on_5m_close(asset, self.on_5m_close)
 
     async def start(self):
-        self._log("MultiEngine starting — 8 assets")
-        if self._sim_mode:
-            await self._preload_prior_day_bars()
-        else:
+        self._log(f"MultiEngine starting — {len(ASSETS)} assets")
+        await self._preload_prior_day_bars()
+        if not self._sim_mode:
             self._candles.start_heartbeat()
         await asyncio.gather(
             self._feed.start(),
@@ -96,12 +97,46 @@ class MultiEngine:
                     lo = float(row["Low"])
                     o, h, c, v = float(row["Open"]), float(row["High"]), float(row["Close"]), float(row["Volume"])
                     if c > 0 and h >= lo:
-                        bars.append(Candle(t=int(ts.timestamp() * 1000), o=round(o, 2), h=round(h, 2),
+                        bars.append(Candle(t=int(ts.timestamp() * 1000), o=round(o, 2), h=round(h, 2),  # type: ignore[union-attr]
                                            l=round(lo, 2), c=round(c, 2), v=v))
                 if bars:
+                    # Exclude bars that would overlap with incoming ticks
+                    bar_dates = sorted(set(
+                        datetime.fromtimestamp(b.t / 1000, tz=ET).strftime("%Y-%m-%d") for b in bars
+                    ))
+                    if self._sim_mode:
+                        # Sim: exclude last 2 days (sim day could be any recent day)
+                        exclude_days = 2
+                    else:
+                        # Live: exclude only today (yesterday's bars needed for pdVP)
+                        exclude_days = 1
+                    if len(bar_dates) > exclude_days:
+                        cutoff_date = bar_dates[-exclude_days]
+                        cutoff_open = datetime.strptime(cutoff_date, "%Y-%m-%d").replace(
+                            hour=0, minute=0, second=0, tzinfo=ET)
+                        today_start_ms = int(cutoff_open.timestamp() * 1000)
+                        prior_bars = [b for b in bars if b.t < today_start_ms]
+                    else:
+                        today_start_ms = int(datetime.fromtimestamp(bars[-1].t / 1000, tz=ET).replace(
+                            hour=9, minute=30, second=0).timestamp() * 1000)
+                        prior_bars = [b for b in bars if b.t < today_start_ms]
                     store = self._candles.get(asset)
-                    store.closed_1m = bars  # seed with multi-day history
-                    self._log(f"{asset}: pre-loaded {len(bars)} 1m bars for prior day VP")
+                    store.closed_1m = prior_bars if prior_bars else bars
+                    # Warm up CVD rolling history with last session's bars
+                    cvd_eng = self._cvd.get(asset)
+                    last_session = [b for b in prior_bars if b.t >= today_start_ms - 86400000 * 2][-390:]
+                    for bar in last_session:
+                        cvd_eng.process_bar(bar)
+                        if len(cvd_eng._history) >= 2:
+                            cvd_eng.record_cvd_turn(cvd_eng._history[-1].delta)
+                    # Reset cumulative CVD for new session but preserve rolling turn history
+                    warm_history = list(cvd_eng._cvd_history[-50:])
+                    cvd_eng.reset()
+                    cvd_eng._cvd_history = warm_history
+                    # Set session_date to today so process_bar doesn't reset again on first bar
+                    from datetime import datetime as _dt
+                    cvd_eng._session_date = _dt.fromtimestamp(today_start_ms / 1000, tz=ET).strftime("%Y-%m-%d")
+                    self._log(f"{asset}: pre-loaded {len(prior_bars)} prior-day 1m bars, CVD warm-up {len(last_session)} bars (excluded {len(bars)-len(prior_bars)} today bars)")
             except Exception as e:
                 self._log(f"{asset}: prior day load failed — {e}", "error")
 
@@ -139,7 +174,8 @@ class MultiEngine:
                                        c=round(float(row["Close"]),2), v=float(row["Volume"]))
                             if c.c > 0 and c.h >= c.l:
                                 out.append(c)
-                        except Exception:
+                        except Exception as e:
+                            pass
                             pass
                     return out
 
@@ -193,22 +229,10 @@ class MultiEngine:
                     continue
                 bar = replay[i]
 
-                # Simulate ticks from this candle: open, high/low, close
-                ts = bar.t
-                vol_chunk = bar.v / 4
+                # V3.3: Feed closed bar directly to CVD — single source of truth
                 self._last_tick_time[asset] = time.time()
-
-                # Tick 1: open
-                self._cvd.process_trade(asset, bar.o, vol_chunk)
-                # Tick 2: high or low (depending on bullish/bearish)
-                if bar.c >= bar.o:
-                    self._cvd.process_trade(asset, bar.l, vol_chunk)
-                    self._cvd.process_trade(asset, bar.h, vol_chunk)
-                else:
-                    self._cvd.process_trade(asset, bar.h, vol_chunk)
-                    self._cvd.process_trade(asset, bar.l, vol_chunk)
-                # Tick 4: close
-                self._cvd.process_trade(asset, bar.c, vol_chunk)
+                set_sim_time(bar.t)
+                self._cvd.get(asset).process_bar(bar)
 
                 # Load bars up to this point
                 bars_so_far = replay[:i+1]
@@ -302,7 +326,8 @@ class MultiEngine:
                                                 self._log(f"SIM DETECT: {asset} FAILED_AUCTION_VAR {fa_dir} at {vp_lbl} VAH/VAL")
                                                 await self._fire_agent(asset, "FAILED_AUCTION_VAR", fa_dir, var_level, c5_last, vol_ratio, cvd_val)
                                                 break
-                                    except Exception:
+                                    except Exception as e:
+                                        pass
                                         pass
 
                             # Level loop: S2 (OB Defense) + S3B (Major Level Rejection)
@@ -325,7 +350,8 @@ class MultiEngine:
                                             self._log(f"SIM DETECT: {asset} OB_DEFENSE {ob_dir} at {level.name} ${level.price:.2f}")
                                             await self._fire_agent(asset, "OB_DEFENSE", ob_dir, level, c5_last, vol_ratio, cvd_val)
                                             break
-                                except Exception:
+                                except Exception as e:
+                                    pass
                                     pass
                                 # Setup 3B: Major Level Rejection only (S3A handled above)
                                 try:
@@ -344,7 +370,8 @@ class MultiEngine:
                                                 self._log(f"SIM DETECT: {asset} FAILED_AUCTION_MAJOR {fa_dir} at {level.name} ${level.price:.2f}")
                                                 await self._fire_agent(asset, "FAILED_AUCTION_MAJOR", fa_dir, level, c5_last, vol_ratio, cvd_val)
                                                 break
-                                except Exception:
+                                except Exception as e:
+                                    pass
                                     pass
 
                         # 1m detection (liquidity grab)
@@ -353,8 +380,9 @@ class MultiEngine:
                                 continue
                             try:
                                 cvd_change = cvd_eng.value - (cvd_eng.value_1min_ago if cvd_eng._history else 0)
-                                result = detect_liquidity_grab(
-                                    bars_so_far[-10:], level, atr, avg_vol, cvd_change, 1.0,
+                                result = detect_5m_sweep(
+                                    store.closed_5m if store.closed_5m else bars_so_far[-10:],
+                                    level, atr, avg_vol, cvd_change, 1.0,
                                 )
                                 if result:
                                     grab_dir = result.get("direction", "NEUTRAL")
@@ -364,7 +392,8 @@ class MultiEngine:
                                         self._log(f"SIM DETECT: {asset} LIQUIDITY_GRAB {grab_dir} at {level.name} ${level.price:.2f}")
                                         await self._fire_agent(asset, "LIQUIDITY_GRAB", grab_dir, level, last, vol_ratio, cvd_change)
                                         break
-                            except Exception:
+                            except Exception as e:
+                                pass
                                 pass
 
             # Broadcast state every 10 bars
@@ -376,7 +405,8 @@ class MultiEngine:
                     try:
                         detail = self.get_asset_state(asset, include_bars=True)
                         await self._on_state({"type": "asset_detail", "asset": asset, "data": detail})
-                    except Exception:
+                    except Exception as e:
+                        pass
                         pass
 
             # Log progress
@@ -424,7 +454,8 @@ class MultiEngine:
                                    c=round(float(row["Close"]),2), v=float(row["Volume"]))
                         if c.c > 0 and c.h >= c.l:
                             daily.append(c)
-                    except Exception:
+                    except Exception as e:
+                        pass
                         pass
                 store = self._candles.get(asset)
                 store.load_daily(daily)
@@ -449,7 +480,8 @@ class MultiEngine:
                                    c=round(float(row["Close"]),2), v=float(row["Volume"]))
                         if c.c > 0 and c.h >= c.l:
                             all_1m.append(c)
-                    except Exception:
+                    except Exception as e:
+                        pass
                         pass
                 # Filter market hours
                 mkt_1m = [c for c in all_1m
@@ -551,7 +583,8 @@ class MultiEngine:
                     try:
                         detail = self.get_asset_state(asset, include_bars=True)
                         await self._on_state({"type": "asset_detail", "asset": asset, "data": detail})
-                    except Exception:
+                    except Exception as e:
+                        pass
                         pass
 
             if i % 10 == 0:
@@ -574,6 +607,8 @@ class MultiEngine:
         cycle = 0
         while True:
             await asyncio.sleep(5)
+            # Check daily reset even when no ticks (runs overnight)
+            self._check_daily_reset()
             if self._on_state:
                 try:
                     # Every 5s: send prices/cvd/bias for all assets
@@ -591,7 +626,8 @@ class MultiEngine:
                         asset = ASSETS[idx]
                         detail = self.get_asset_state(asset, include_bars=True)
                         await self._on_state({"type": "asset_detail", "asset": asset, "data": detail})
-                except Exception:
+                except Exception as e:
+                    pass
                     pass
 
     def _get_session_label(self) -> str:
@@ -612,7 +648,8 @@ class MultiEngine:
         # In sim mode, advance the simulated clock from tick timestamps
         if self._sim_mode:
             set_sim_time(ts_ms)
-        self._cvd.process_trade(asset, price, volume)
+        # V3.3: CVD no longer processes raw ticks — it uses closed candles
+        # from on_1m_close to stay in sync with candle store bars
         self._candles.process_tick(asset, price, volume, ts_ms)
         if self._on_tick:
             await self._on_tick({"type": "tick", "asset": asset, "price": price, "cvd": self._cvd.value(asset)})
@@ -673,7 +710,67 @@ class MultiEngine:
     def _is_cvd_quarantined(self, asset: str) -> bool:
         return self._cvd.get(asset).is_estimated
 
+    def _check_daily_reset(self):
+        """Full midnight reset — clears ALL state so each day starts completely fresh."""
+        today = now_et().strftime("%Y-%m-%d")
+        if today == self._last_session_date:
+            return
+        self._last_session_date = today
+        self._log(f"=== MIDNIGHT RESET: {today} — clearing all state ===")
+
+        for asset in ASSETS:
+            # Detection state
+            self._pending_sweep[asset] = None
+            self._investigating[asset] = False
+
+            # Opening range
+            self._or_high[asset] = 0.0
+            self._or_low[asset] = 0.0
+            self._or_locked[asset] = False
+            self._or_lock_ts[asset] = 0
+
+            # Health
+            self._health[asset] = DataHealth(asset=asset)
+
+            # Candle store — clear all bars, start fresh
+            store = self._candles.get(asset)
+            store.c1m.clear()
+            if hasattr(store, 'c5m_live') and store.c5m_live is not None:
+                store.c5m_live.clear()
+            if hasattr(store, '_c5m_yf'):
+                store._c5m_yf.clear()
+            if hasattr(store, 'c15m_live') and store.c15m_live is not None:
+                store.c15m_live.clear()
+            if hasattr(store, '_c15m_yf'):
+                store._c15m_yf.clear()
+            store._last_eval_ts = 0
+            if hasattr(store, '_pending_5m_fire'):
+                store._pending_5m_fire = False
+
+            # Tick tracking
+            self._last_tick_time[asset] = 0.0
+            self._last_tick_ts[asset] = 0.0
+
+        # CVD — full reset across all assets
+        self._cvd.reset_all()
+
+        # Levels and profiles
+        self._levels = {a: [] for a in ASSETS}
+        self._vol_profiles.clear()
+        self._day_contexts.clear()
+        self._prior_day_vp.clear()
+        self._last_vwap.clear()
+        self._zones = {a: [] for a in ASSETS}
+
+        # Tracking and gates
+        self._ws_disconnect_count = 0
+        self._tracker.reset_daily()
+        self._signal_history.clear()
+
+        self._log(f"=== RESET COMPLETE — all candles, levels, CVD, signals cleared ===")
+
     async def on_1m_close(self, asset: str):
+        self._check_daily_reset()
         if not self._sim_mode and not is_trading_hours():
             return
         # Health-aware staleness check (skip in sim mode — ticks are historical)
@@ -689,13 +786,13 @@ class MultiEngine:
             return
 
         last = bars[-1]
+        # V3.3: Feed closed candle to CVD — single source of truth, no tick/clock mismatch
+        self._cvd.get(asset).process_bar(last)
         cvd_now = self._cvd.value(asset)
         cvd_prev = self._cvd.get(asset).value_1min_ago
         # Record CVD turn for rolling average
         cvd_1m_turn = cvd_now - cvd_prev
         self._cvd.get(asset).record_cvd_turn(cvd_1m_turn)
-        avg_vol = self._avg_vol(asset, "1m")
-        atr = self._calc_atr(asset)
 
         self._update_or(asset, bars)
 
@@ -707,58 +804,11 @@ class MultiEngine:
 
         # Heavy compute (levels + volume profile) moved to on_5m_close
 
-        # V3.3: Confirmation candle — check pending signals from previous bar
-        await self._check_pending_confirmation(asset, last)
-
+        # V4.0: Check 1m momentum confirmation for pending 5m sweeps
         if not self._investigating[asset]:
-            await self._check_liquidity_grabs(asset, last, cvd_now, cvd_prev, avg_vol)
+            await self._check_sweep_momentum(asset, last)
 
-        # S3B 1m Sniper: check for rejection on 1m candle using 5m approach context
-        if not self._investigating[asset]:
-            await self._check_s3b_sniper(asset, bars, last, cvd_now, cvd_prev, avg_vol, atr)
-
-    async def _check_s3b_sniper(self, asset, bars_1m, candle, cvd_now, cvd_prev, avg_vol_1m, atr):
-        """S3B 1m sniper — uses 5m approach context, triggers on 1m rejection candle."""
-        store = self._candles.get(asset)
-        bars_5m = store.closed_5m
-        if len(bars_5m) < 3:
-            return
-
-        dc = self._day_contexts.get(asset)
-        bias = dc.bias if dc else "NEUTRAL"
-        cvd_eng = self._cvd.get(asset)
-        cvd_turn = cvd_now - cvd_prev
-        rolling_avg_cvd = cvd_eng.rolling_avg_cvd_turn(10)
-        cvd_quarantine = self._is_cvd_quarantined(asset)
-
-        # S3B only — S3A is handled in on_5m_close outside the level loop
-        from ..detection.failed_auction import _detect_major_level
-        for level in self._levels[asset]:
-            if level.score < 8 or self._tracker.is_locked(asset, level.name):
-                continue
-            try:
-                result = _detect_major_level(
-                    bars_5m, level, atr, avg_vol_1m, cvd_turn, rolling_avg_cvd,
-                    cvd_quarantine, bias, candles_1m=bars_1m[-10:],
-                )
-                if result:
-                    fa_dir = result.get("direction", "NEUTRAL")
-                    vol_ratio = candle.v / avg_vol_1m if avg_vol_1m > 0 else 1.0
-                    passed, _ = self._gates.check_all(asset, level.score, vol_ratio, self._vix, fa_dir, bias)
-                    if passed:
-                        approach = result.get("approach")
-                        self._log(f"{asset} FAILED_AUCTION_MAJOR {fa_dir} at {level.name} ${level.price:.2f}")
-                        self._queue_pending(asset, {
-                            "pattern": "FAILED_AUCTION_MAJOR", "direction": fa_dir,
-                            "level": level, "candle": candle,
-                            "vol_ratio": vol_ratio, "cvd_change": cvd_turn,
-                            "approach_type": approach.type if approach else "",
-                            "approach_confidence_pts": approach.confidence_pts if approach else 0,
-                            "cvd_quarantine": cvd_quarantine,
-                        })
-                        break
-            except Exception:
-                pass
+        # V4.0: S3B moved to on_5m_close with pending_sweep + 1m momentum (same as S1)
 
     async def on_5m_close(self, asset: str):
         if not self._sim_mode and not is_trading_hours():
@@ -831,32 +881,48 @@ class MultiEngine:
 
         if not self._investigating[asset] and now_hour >= 11.0:
             from ..detection.failed_auction import _detect_var
+            store = self._candles.get(asset)
             for s3a_vah, s3a_val, s3a_poc, var_level, vp_label in s3a_checks:
                 if self._investigating[asset]:
                     break
                 try:
+                    # Get 1m bars inside this 5m bar for enrichment
+                    sweep_start = last.t
+                    sweep_end = sweep_start + 5 * 60_000
+                    bars_1m_inside = [b for b in store.closed_1m if sweep_start <= b.t < sweep_end]
+
                     result = _detect_var(
                         bars, var_level, atr, avg_vol, cvd_turn, rolling_avg_cvd,
                         s3a_vah, s3a_val, s3a_poc, now_hour, cvd_quarantine, bias,
+                        bars_1m_inside=bars_1m_inside,
+                        atr_1m=self._calc_atr(asset),
+                        rolling_avg_vol_1m=avg_vol_1m,
                     )
                     if result:
                         fa_dir = result.get("direction", "NEUTRAL")
-                        vol_ratio = last.v / avg_vol if avg_vol > 0 else 1.0
+                        vol_ratio = result.get("vol_ratio", 1.0)
                         passed, _ = self._gates.check_all(asset, var_level.score, vol_ratio, self._vix, fa_dir, bias)
                         if passed:
-                            approach = result.get("approach")
-                            self._log(f"{asset} FAILED_AUCTION_VAR {fa_dir} at {vp_label} VAH/VAL target=POC ${s3a_poc:.2f}")
-                            self._queue_pending(asset, {
-                                "pattern": "FAILED_AUCTION_VAR", "direction": fa_dir,
-                                "level": var_level, "candle": last,
-                                "vol_ratio": vol_ratio, "cvd_change": cvd_turn,
-                                "approach_type": approach.type if approach else "",
-                                "approach_confidence_pts": approach.confidence_pts if approach else 0,
-                                "cvd_quarantine": cvd_quarantine,
-                            })
+                            self._log(f"[5m] {asset} VAR {fa_dir} at {vp_label} VAH/VAL target=POC ${s3a_poc:.2f} conf={result['confidence'].score} — pending 1m momentum")
+                            self._pending_sweep[asset] = {
+                                "pattern": "FAILED_AUCTION_VAR",
+                                "direction": fa_dir,
+                                "level": var_level,
+                                "sweep_candle": last,
+                                "wick_extreme": result.get("wick_extreme", 0),
+                                "result": result,
+                                "bars_remaining": 3,
+                                "setup_data": result,
+                            }
                             break
-                except Exception:
+                except Exception as e:
                     pass
+                    pass
+
+        # ── V4.0: S1 5m Sweep Detection (replaces 1m liquidity grab) ──
+        if not self._investigating[asset]:
+            atr_5m = atr  # already computed above
+            await self._check_5m_sweeps(asset, bars, last, avg_vol, atr_5m, cvd_turn, rolling_avg_cvd, bias)
 
         # ── Level loop: S2 (OB Defense) + S3B (Major Level Rejection) ──
         for level in self._levels[asset]:
@@ -865,142 +931,190 @@ class MultiEngine:
             if self._investigating[asset]:
                 break
 
-            # Setup 2: OB Defense
+            # Setup 2: OB Defense — V4.0 with pending_sweep + 1m momentum
             try:
+                sweep_start = last.t
+                sweep_end = sweep_start + 5 * 60_000
+                bars_1m_inside_s2 = [b for b in store.closed_1m if sweep_start <= b.t < sweep_end]
                 result = detect_ob_defense(
                     bars, bars_1m, level, atr, avg_vol, avg_vol_1m,
                     cvd_turn, rolling_avg_cvd, day_type, bias,
                     cvd_quarantine=cvd_quarantine,
+                    bars_1m_inside=bars_1m_inside_s2,
+                    atr_1m=self._calc_atr(asset),
                 )
                 if result:
                     ob_dir = result.get("direction", "NEUTRAL")
-                    vol_ratio = last.v / avg_vol if avg_vol > 0 else 1.0
+                    vol_ratio = result.get("vol_ratio", 1.0)
                     passed, reason = self._gates.check_all(asset, level.score, vol_ratio, self._vix, ob_dir, bias)
                     if passed:
-                        approach = result.get("approach")
-                        self._log(f"{asset} OB_DEFENSE {ob_dir} at {level.name} ${level.price:.2f}")
-                        await self._fire_agent(
-                            asset, "OB_DEFENSE", ob_dir, level, last, vol_ratio, cvd_turn,
-                            approach_type=approach.type if approach else "",
-                            approach_confidence_pts=approach.confidence_pts if approach else 0,
-                            cvd_quarantine=cvd_quarantine,
-                        )
+                        self._log(f"[5m] {asset} OB_DEFENSE {ob_dir} at {level.name} ${level.price:.2f} conf={result['confidence'].score} — pending 1m momentum")
+                        self._pending_sweep[asset] = {
+                            "pattern": "OB_DEFENSE",
+                            "direction": ob_dir,
+                            "level": level,
+                            "sweep_candle": last,
+                            "wick_extreme": result.get("wick_extreme", 0),
+                            "result": result,
+                            "bars_remaining": 3,
+                            "setup_data": result,
+                        }
                         break
-            except Exception:
+            except Exception as e:
+                pass
                 pass
 
-            # Setup 3B: Major Level Rejection (S3B only — S3A moved out of loop)
+            # Setup 3B: Major Level Rejection — V4.0 5m detection + 1m momentum
             if level.score >= 8:
                 try:
                     from ..detection.failed_auction import _detect_major_level
+                    sweep_start = last.t
+                    sweep_end = sweep_start + 5 * 60_000
+                    bars_1m_inside = [b for b in store.closed_1m if sweep_start <= b.t < sweep_end]
                     result = _detect_major_level(
-                        bars, level, atr, avg_vol_1m, cvd_turn, rolling_avg_cvd,
-                        cvd_quarantine, bias, candles_1m=bars_1m[-10:],
+                        bars, level, atr, avg_vol, cvd_turn, rolling_avg_cvd,
+                        cvd_quarantine, bias,
+                        bars_1m_inside=bars_1m_inside,
+                        atr_1m=self._calc_atr(asset),
+                        rolling_avg_vol_1m=avg_vol_1m,
                     )
                     if result:
                         fa_dir = result.get("direction", "NEUTRAL")
-                        vol_ratio = last.v / avg_vol if avg_vol > 0 else 1.0
+                        vol_ratio = result.get("vol_ratio", 1.0)
                         passed, reason = self._gates.check_all(asset, level.score, vol_ratio, self._vix, fa_dir, bias)
                         if passed:
-                            approach = result.get("approach")
-                            self._log(f"{asset} FAILED_AUCTION_MAJOR {fa_dir} at {level.name} ${level.price:.2f}")
-                            self._queue_pending(asset, {
-                                "pattern": "FAILED_AUCTION_MAJOR", "direction": fa_dir,
-                                "level": level, "candle": last,
-                                "vol_ratio": vol_ratio, "cvd_change": cvd_turn,
-                                "approach_type": approach.type if approach else "",
-                                "approach_confidence_pts": approach.confidence_pts if approach else 0,
-                                "cvd_quarantine": cvd_quarantine,
-                            })
+                            self._log(f"[5m] {asset} REJECTION {fa_dir} at {level.name} ${level.price:.2f} conf={result['confidence'].score} — pending 1m momentum")
+                            self._pending_sweep[asset] = {
+                                "pattern": "FAILED_AUCTION_MAJOR",
+                                "direction": fa_dir,
+                                "level": level,
+                                "sweep_candle": last,
+                                "wick_extreme": result.get("wick_extreme", 0),
+                                "result": result,
+                                "bars_remaining": 3,
+                                "setup_data": result,
+                            }
                             break
-                except Exception:
+                except Exception as e:
+                    pass
                     pass
 
-    async def _check_liquidity_grabs(self, asset, candle, cvd_now, cvd_prev, avg_vol):
-        dc = self._day_contexts.get(asset)
-        bias = dc.bias if dc else "NEUTRAL"
-        atr = self._calc_atr(asset)
+    async def _check_5m_sweeps(self, asset, bars_5m, last_5m, avg_vol_5m, atr_5m, cvd_turn, rolling_avg_cvd, bias):
+        """V4.0: Detect institutional sweep on 5m bar close. Store pending for 1m momentum confirmation."""
         store = self._candles.get(asset)
-        bars_1m = store.closed_1m[-10:]  # last 10 1m bars for liquidity grab detection
         cvd_quarantine = self._is_cvd_quarantined(asset)
+        atr_1m = self._calc_atr(asset)
+        avg_vol_1m = self._avg_vol(asset, "1m")
+
         for level in self._levels[asset]:
             if level.score < MIN_LEVEL_SCORE or self._tracker.is_locked(asset, level.name):
                 continue
-            cvd_change = cvd_now - cvd_prev
-            cvd_eng = self._cvd.get(asset)
-            rolling_avg_cvd = cvd_eng.rolling_avg_cvd_turn(10)
             try:
-                result = detect_liquidity_grab(
-                    bars_1m, level, atr, avg_vol, cvd_change, rolling_avg_cvd,
+                # Get 1m bars inside this 5m bar for enrichment scoring
+                sweep_start = last_5m.t
+                sweep_end = sweep_start + 5 * 60_000
+                bars_1m_inside = [b for b in store.closed_1m if sweep_start <= b.t < sweep_end]
+
+                result = detect_5m_sweep(
+                    bars_5m, level, atr_5m, avg_vol_5m,
+                    cvd_turn, rolling_avg_cvd,
                     cvd_quarantine=cvd_quarantine, day_bias=bias,
+                    bars_1m_inside=bars_1m_inside,
+                    atr_1m=atr_1m,
+                    rolling_avg_vol_1m=avg_vol_1m,
                 )
                 if result:
                     grab_dir = result.get("direction", "NEUTRAL")
-                    vol_ratio = candle.v / avg_vol if avg_vol > 0 else 1.0
+                    vol_ratio = result.get("vol_ratio", 1.0)
                     passed, _ = self._gates.check_all(asset, level.score, vol_ratio, self._vix, grab_dir, bias)
                     if passed:
-                        self._log(f"{asset} LIQUIDITY_GRAB {grab_dir} at {level.name} ${level.price:.2f}")
-                        approach = result.get("approach")
-                        self._queue_pending(asset, {
-                            "pattern": "LIQUIDITY_GRAB", "direction": grab_dir,
-                            "level": level, "candle": candle,
-                            "vol_ratio": vol_ratio, "cvd_change": cvd_change,
-                            "approach_type": approach.type if approach else "",
-                            "approach_confidence_pts": approach.confidence_pts if approach else 0,
-                            "cvd_quarantine": cvd_quarantine,
-                        })
+                        self._log(f"[5m] {asset} SWEEP {grab_dir} at {level.name} ${level.price:.2f} conf={result['confidence'].score} — pending 1m momentum")
+                        self._pending_sweep[asset] = {
+                            "pattern": "LIQUIDITY_GRAB",
+                            "direction": grab_dir,
+                            "level": level,
+                            "sweep_candle": last_5m,
+                            "wick_extreme": result.get("wick_extreme", 0),
+                            "result": result,
+                            "bars_remaining": 3,
+                            "setup_data": result,
+                        }
                         break
-            except Exception:
+            except Exception as e:
+                pass
                 pass
 
-    def _queue_pending(self, asset: str, pending: dict):
-        """V3.3: Queue a reversal detection for confirmation on the next 1m bar."""
-        self._pending_confirm[asset] = pending
-        self._log(f"{asset} PENDING: {pending['pattern']} {pending['direction']} at {pending['level'].name} — awaiting confirmation candle")
-
-    async def _check_pending_confirmation(self, asset: str, candle):
-        """V3.3: Check if the confirmation candle validates the pending reversal."""
-        pending = self._pending_confirm.get(asset)
+    async def _check_sweep_momentum(self, asset, candle_1m):
+        """V4.0: Check if a pending 5m sweep gets 1m momentum confirmation."""
+        pending = self._pending_sweep.get(asset)
         if not pending:
-            return
-        self._pending_confirm[asset] = None  # clear regardless of outcome
-
-        if self._investigating[asset]:
-            self._log(f"{asset} PENDING DROPPED: {pending['pattern']} — asset busy")
             return
 
         direction = pending["direction"]
         level = pending["level"]
-        trigger_candle = pending["candle"]
+        wick_extreme = pending["wick_extreme"]
+        atr_1m = self._calc_atr(asset)
+        avg_vol_1m = self._avg_vol(asset, "1m")
 
-        # Confirmation: next candle must close in the reversal direction
-        # and must NOT break back through the level (invalidation)
+        # Invalidation: price broke wick extreme → real breakout
+        if direction == "BULLISH" and candle_1m.c < wick_extreme:
+            self._pending_sweep[asset] = None
+            self._log(f"[1m] {asset} SWEEP INVALIDATED — price broke below wick ${wick_extreme:.2f}")
+            return
+        if direction == "BEARISH" and candle_1m.c > wick_extreme:
+            self._pending_sweep[asset] = None
+            self._log(f"[1m] {asset} SWEEP INVALIDATED — price broke above wick ${wick_extreme:.2f}")
+            return
+
+        # Momentum check: sharp 1m candle in reversal direction
+        body = abs(candle_1m.c - candle_1m.o)
+        vol_ratio = candle_1m.v / avg_vol_1m if avg_vol_1m > 0 else 1.0
+
         if direction == "BULLISH":
-            confirmed = candle.c > candle.o  # bullish close
-            invalidated = candle.c < level.price  # closed back below level
+            is_momentum = (candle_1m.c > candle_1m.o
+                           and body >= atr_1m * 0.4
+                           and candle_1m.c > level.price
+                           and vol_ratio >= 1.0)
         else:
-            confirmed = candle.c < candle.o  # bearish close
-            invalidated = candle.c > level.price  # closed back above level
+            is_momentum = (candle_1m.c < candle_1m.o
+                           and body >= atr_1m * 0.4
+                           and candle_1m.c < level.price
+                           and vol_ratio >= 1.0)
 
-        if invalidated:
-            self._log(f"{asset} CONFIRM FAILED: {pending['pattern']} {direction} at {level.name} — price broke back through level")
+        if is_momentum:
+            self._log(f"[1m] {asset} MOMENTUM CONFIRMED {pending['pattern']} {direction} — body={body:.2f} vol={vol_ratio:.1f}x → firing agent")
+            self._pending_sweep[asset] = None
+            result = pending["result"]
+            approach = result.get("approach")
+
+            self._tracker._locked.add(self._tracker._key(asset, level.name))
+            await self._fire_agent(
+                asset, pending["pattern"], direction, level,
+                pending["sweep_candle"],
+                result.get("vol_ratio", 1.0),
+                result.get("cvd_ratio", 0.0),
+                retest_candle=candle_1m,
+                approach_type=approach.type if approach else "",
+                approach_confidence_pts=approach.confidence_pts if approach else 0,
+                cvd_quarantine=result.get("cvd_quarantine", False),
+                fvg_found=result.get("fvg_found", False),
+                fvg_mid=result.get("fvg_midpoint", 0.0),
+                trend_5m=result.get("trend_5m", "NEUTRAL"),
+                trend_pts=result.get("trend_pts", 0),
+                setup_data=result,
+            )
             return
 
-        if not confirmed:
-            self._log(f"{asset} CONFIRM FAILED: {pending['pattern']} {direction} at {level.name} — no directional follow-through")
-            return
+        # Decrement bars remaining
+        pending["bars_remaining"] -= 1
+        if pending["bars_remaining"] <= 0:
+            self._pending_sweep[asset] = None
+            self._log(f"[1m] {asset} SWEEP EXPIRED — no momentum in 3 bars")
 
-        self._log(f"{asset} CONFIRMED: {pending['pattern']} {direction} at {level.name} — firing agent")
-        self._tracker._locked.add(self._tracker._key(asset, level.name))
-        await self._fire_agent(
-            asset, pending["pattern"], direction, level,
-            trigger_candle, pending["vol_ratio"], pending["cvd_change"],
-            approach_type=pending.get("approach_type", ""),
-            approach_confidence_pts=pending.get("approach_confidence_pts", 0),
-            cvd_quarantine=pending.get("cvd_quarantine", False),
-        )
+    # V3.3 _queue_pending and _check_pending_confirmation removed in V4.0
+    # All setups now use _pending_sweep + _check_sweep_momentum
 
-    async def _fire_agent(self, asset, pattern, direction, level, candle, vol_ratio, cvd_change, retest_candle=None, cvd_at_retest=0.0, cvd_turned=False, strength="", approach_type="", approach_confidence_pts=0, cvd_quarantine=False):
+    async def _fire_agent(self, asset, pattern, direction, level, candle, vol_ratio, cvd_change, retest_candle=None, cvd_at_retest=0.0, cvd_turned=False, strength="", approach_type="", approach_confidence_pts=0, cvd_quarantine=False, fvg_found=False, fvg_mid=0.0, fvg_bonus=0, trend_5m="NEUTRAL", trend_pts=0, setup_data=None):
         if self._investigating[asset]:
             return
         self._investigating[asset] = True
@@ -1029,11 +1143,23 @@ class MultiEngine:
                                              {"asset": asset})
             verification_data = handler_for_verify.verify_setup(asset)
 
+            # Compute cvd_turned dynamically from actual CVD data
+            cvd_eng = self._cvd.get(asset)
+            cvd_current = cvd_eng.value
+            cvd_1ago = cvd_eng.value_1min_ago
+            cvd_delta = cvd_current - cvd_1ago
+            if direction == "BULLISH":
+                actual_cvd_turned = cvd_delta > 0  # CVD turning positive = buyers stepping in
+            elif direction == "BEARISH":
+                actual_cvd_turned = cvd_delta < 0  # CVD turning negative = sellers stepping in
+            else:
+                actual_cvd_turned = False
+
             brief = build_brief(
                 asset=asset, pattern=pattern, direction=direction, level=level,
                 event_candle=candle, retest_candle=retest_candle,
-                cvd_at_break=cvd_change, cvd_now=self._cvd.value(asset),
-                cvd_turned=cvd_turned, volume_ratio=vol_ratio,
+                cvd_at_break=cvd_change, cvd_now=cvd_current,
+                cvd_turned=actual_cvd_turned, volume_ratio=vol_ratio,
                 day_context=dc, vix=self._vix, current_price=price, atr=atr,
                 nearest_above=above, nearest_below=below,
                 session_name=session.label, session_quality=session.quality,
@@ -1042,24 +1168,33 @@ class MultiEngine:
                 approach_type=approach_type,
                 approach_confidence_pts=approach_confidence_pts,
                 cvd_quarantine=cvd_quarantine,
+                bars_1m=store.closed_1m[-6:],
+                fvg_found=fvg_found,
+                fvg_mid=fvg_mid,
+                fvg_bonus=fvg_bonus,
+                trend_5m=trend_5m,
+                trend_pts=trend_pts,
+                setup_data=setup_data,
             )
 
             # Pre-compute trade fields so send_signal auto-fills them
             # TP1 must be at least 1× ATR away from entry to avoid targeting noise levels
             # Skip levels that are too close and find the first meaningful target
+            # V4.0: Stop at wick extreme if available (5m sweep), else level ± ATR
+            sweep_wick = (setup_data or {}).get("wick_extreme", 0)
             if direction == "BULLISH":
                 s_entry = price
-                s_stop = level.price - atr * 0.5
+                s_stop = (sweep_wick - atr * 0.1) if sweep_wick > 0 else (level.price - atr * 0.5)
                 s_risk = abs(s_entry - s_stop)
-                min_tp_dist = max(atr * 1.0, s_risk * 2.0)  # at least 1 ATR or 2:1 RR
+                min_tp_dist = max(atr * 1.0, s_risk * 2.0)
                 tp_candidates = [l for l in above if (l.price - s_entry) >= min_tp_dist]
                 if not tp_candidates:
-                    tp_candidates = above  # fallback to nearest if nothing far enough
+                    tp_candidates = above
                 s_tp1 = tp_candidates[0].price if tp_candidates else s_entry + atr * 2
                 s_tp2 = tp_candidates[1].price if len(tp_candidates) > 1 else 0
             elif direction == "BEARISH":
                 s_entry = price
-                s_stop = level.price + atr * 0.5
+                s_stop = (sweep_wick + atr * 0.1) if sweep_wick > 0 else (level.price + atr * 0.5)
                 s_risk = abs(s_entry - s_stop)
                 min_tp_dist = max(atr * 1.0, s_risk * 2.0)
                 tp_candidates = [l for l in below if (s_entry - l.price) >= min_tp_dist]
@@ -1071,6 +1206,12 @@ class MultiEngine:
                 s_entry, s_stop, s_tp1, s_tp2 = price, 0, 0, 0
                 s_risk = 0
             s_rr = abs(s_tp1 - s_entry) / s_risk if s_risk > 0 else 0
+
+            # Fix 6: RR hard gate — abort before agent if RR insufficient
+            rr_passed, rr_reason = self._gates.check_rr(s_entry, s_stop, s_tp1)
+            if not rr_passed:
+                self._log(f"{asset} RR GATE FAILED: {rr_reason}")
+                return
 
             # Options pre-compute
             from ..context.options_context import get_options_env
@@ -1169,6 +1310,7 @@ class MultiEngine:
             or_done = is_or_complete()
         if or_done and not self._or_locked[asset]:
             self._or_locked[asset] = True
+            self._or_lock_ts[asset] = int(now_et().timestamp() * 1000)
             self._tracker.reset_daily()
             self._log(f"{asset} OR locked H:${self._or_high[asset]:.2f} L:${self._or_low[asset]:.2f}")
             self._assess_day(asset)
@@ -1218,6 +1360,8 @@ class MultiEngine:
             self._vol_profiles.get(asset), self._zones.get(asset, []),
             gap_pct=gap_pct,
             prior_day_vp=self._prior_day_vp.get(asset),
+            or_lock_ts=self._or_lock_ts.get(asset, 0),
+            c15m_recent=store.closed_15m,
         )
 
     def _find_level(self, asset, name):

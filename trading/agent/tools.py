@@ -74,13 +74,43 @@ class ToolHandler:
             return f"Unknown asset: {asset}"
         eng = self._cvd.get(asset)
         hist = eng.get_history(minutes)
-        lines = [f"{asset} CVD:", f"  Current: {eng.value:+,.0f} ({eng.bias})"]
-        if hist:
-            for pt in hist[-10:]:
-                lines.append(f"    {pt.time_et}  {pt.value:+,.0f}  (delta: {pt.delta:+,.0f})")
-            if len(hist) >= 3:
-                trend = "RISING" if hist[-1].value > hist[-3].value else "FALLING" if hist[-1].value < hist[-3].value else "FLAT"
-                lines.append(f"  Trend: {trend}")
+        rolling_avg = eng.rolling_avg_cvd_turn(10)
+
+        # Bias classification
+        bias = eng.bias
+        if bias == "BUYERS":
+            bias_label = "BUYERS_AGGRESSIVE" if rolling_avg > 0 and abs(eng.value) > rolling_avg * 2 else "BUYERS"
+        elif bias == "SELLERS":
+            bias_label = "SELLERS_AGGRESSIVE" if rolling_avg > 0 and abs(eng.value) > rolling_avg * 2 else "SELLERS"
+        else:
+            bias_label = "NEUTRAL"
+
+        # Direction from recent history
+        if len(hist) >= 3:
+            direction = "RISING" if hist[-1].value > hist[-3].value else "FALLING" if hist[-1].value < hist[-3].value else "FLAT"
+            turned_this_bar = len(hist) >= 2 and (
+                (hist[-1].delta > 0 and hist[-2].delta < 0) or
+                (hist[-1].delta < 0 and hist[-2].delta > 0)
+            )
+            if turned_this_bar:
+                direction += " (turned this bar)"
+        else:
+            direction = "INSUFFICIENT DATA"
+
+        # Current bar ratio vs rolling average
+        last_turn = abs(hist[-1].delta) if hist else 0
+        ratio = last_turn / rolling_avg if rolling_avg > 0 else 0
+
+        lines = [
+            f"{asset} CVD:",
+            f"  CVD RATIO:     {ratio:.1f}× rolling average",
+            f"  CVD BIAS:      {bias_label}",
+            f"  CVD DIRECTION: {direction}",
+        ]
+
+        if eng.is_estimated:
+            lines.append(f"  ⚠ CVD QUARANTINED — data unreliable after WS reconnect")
+
         # Divergence detection
         store = self._candles.get(asset)
         if store and store.closed_1m:
@@ -100,7 +130,7 @@ class ToolHandler:
         ec = s.get("event_candle")
         if ec:
             lines.append(f"  Candle: O:{ec.o:.2f} H:{ec.h:.2f} L:{ec.l:.2f} C:{ec.c:.2f}")
-            lines.append(f"  Volume: {s.get('volume_ratio',0):.1f}x avg | CVD: {s.get('cvd_change',0):+,.0f}")
+            lines.append(f"  Volume: {s.get('volume_ratio',0):.1f}x avg")
         result = "\n".join(lines)
         return result[:2000] if len(result) > 2000 else result
 
@@ -335,7 +365,7 @@ TOOL_DEFINITIONS = [
     {"type": "function", "function": {"name": "send_signal", "description": "Your verdict. Trade fields (entry/stop/options) are auto-filled from the Brief. You provide only the decision.", "parameters": {"type": "object", "properties": {"signal": {"type": "string", "enum": ["LONG","SHORT","WAIT"]}, "confidence": {"type": "integer", "description": "0-100. 80+=HIGH, 50-79=MEDIUM, <50=LOW"}, "narrative": {"type": "string", "description": "1-2 sentence thesis"}, "reasoning": {"type": "string", "description": "What the tape showed you (LONG/SHORT) or why you passed (WAIT)"}, "invalidation": {"type": "string", "description": "Exact exit condition, e.g. '1m close below POC $639.50'. Use 'N/A' for WAIT."}, "wait_for": {"type": "string", "description": "WAIT only: exact condition to re-engage"}}, "required": ["signal","confidence","narrative","reasoning","invalidation"]}}},
     # Deep-dive tools — use only if the Brief + Verification Data raises questions
     {"type": "function", "function": {"name": "get_candles", "description": "Get candles for a specific timeframe (1m/5m/15m/daily).", "parameters": {"type": "object", "properties": {"asset": {"type": "string", "enum": ASSETS}, "timeframe": {"type": "string", "enum": ["1m","5m","15m","daily"]}, "count": {"type": "integer", "default": 10}}, "required": ["asset","timeframe"]}}},
-    {"type": "function", "function": {"name": "get_cvd", "description": "Detailed CVD timeline, delta, bias, divergence detection.", "parameters": {"type": "object", "properties": {"asset": {"type": "string", "enum": ASSETS}, "minutes": {"type": "integer", "default": 15}}, "required": ["asset"]}}},
+    {"type": "function", "function": {"name": "get_cvd", "description": "CVD ratio (vs rolling average), bias (BUYERS/SELLERS/NEUTRAL), direction (RISING/FALLING/FLAT), turn detection, and divergence check. No raw values — ratios only.", "parameters": {"type": "object", "properties": {"asset": {"type": "string", "enum": ASSETS}, "minutes": {"type": "integer", "default": 15}}, "required": ["asset"]}}},
     {"type": "function", "function": {"name": "get_level_info", "description": "Deep dive on a specific level — score, history, confluence.", "parameters": {"type": "object", "properties": {"asset": {"type": "string", "enum": ASSETS}, "level_name": {"type": "string"}}, "required": ["asset","level_name"]}}},
     {"type": "function", "function": {"name": "get_level_map", "description": "All levels above/below price with ATR distances.", "parameters": {"type": "object", "properties": {"asset": {"type": "string", "enum": ASSETS}}, "required": ["asset"]}}},
     {"type": "function", "function": {"name": "calculate_rr", "description": "Recalculate RR with different entry/stop/target.", "parameters": {"type": "object", "properties": {"entry": {"type": "number"}, "stop": {"type": "number"}, "target": {"type": "number"}}, "required": ["entry","stop","target"]}}},

@@ -12,11 +12,11 @@ def get_current_session() -> Session:
     t = now.hour * 60 + now.minute
     if t < 570: return Session(id=SessionId.PREMARKET, label="PRE-MARKET", quality=0, color="#475569", min_remaining=0)
     if t < 600: return Session(id=SessionId.OR, label="OR FORMING", quality=0, color="#f59e0b", min_remaining=600 - t)
-    if t < 660: return Session(id=SessionId.POWER, label="POWER HOUR", quality=5, color="#00c97e", min_remaining=660 - t)
+    if t < 660: return Session(id=SessionId.POWER, label="MORNING DRIVE", quality=5, color="#00c97e", min_remaining=660 - t)
     if t < 720: return Session(id=SessionId.MID, label="MID MORNING", quality=4, color="#60a5fa", min_remaining=720 - t)
     if t < 840: return Session(id=SessionId.DEAD, label="DEAD ZONE", quality=1, color="#ff4060", min_remaining=840 - t)
-    if t < 930: return Session(id=SessionId.AFT, label="AFTERNOON", quality=4, color="#a78bfa", min_remaining=930 - t)
-    if t < 945: return Session(id=SessionId.CLOSE, label="POWER CLOSE", quality=3, color="#f59e0b", min_remaining=945 - t)
+    if t < 900: return Session(id=SessionId.AFT, label="AFTERNOON", quality=4, color="#a78bfa", min_remaining=900 - t)
+    if t < 945: return Session(id=SessionId.CLOSE, label="POWER HOUR", quality=5, color="#00c97e", min_remaining=945 - t)
     if t < 960: return Session(id=SessionId.CUTOFF, label="HARD CUTOFF", quality=0, color="#ff4060", min_remaining=0)
     return Session(id=SessionId.AH, label="AFTER HOURS", quality=0, color="#475569", min_remaining=0)
 

@@ -1,7 +1,7 @@
 import time
 import pytz
 from datetime import datetime
-from ..constants import VIX_HARD_BLOCK, VIX_REDUCE_HALF, VIX_REDUCE_QUARTER, MIN_LEVEL_SCORE, GLOBAL_PAUSE_SEC, ASSET_COOLDOWN_SEC, MAX_SIGNALS_PER_ASSET
+from ..constants import VIX_HARD_BLOCK, VIX_REDUCE_HALF, VIX_REDUCE_QUARTER, MIN_LEVEL_SCORE, GLOBAL_PAUSE_SEC, ASSET_COOLDOWN_SEC, MAX_SIGNALS_PER_ASSET, MIN_RR
 from ..context.session import is_signal_allowed
 from ..context.sim_clock import now_et
 
@@ -84,6 +84,19 @@ class GateSystem:
         self._last_signal_time = now
         self._asset_last_signal[asset] = now
         self._daily_counts[asset] = self._daily_counts.get(asset, 0) + 1
+
+    def check_rr(self, entry: float, stop: float, tp1: float, min_rr: float = MIN_RR) -> tuple:
+        """Hard gate. Returns (passed, reason). Called before agent fires."""
+        if stop == entry:
+            return False, "Stop equals entry — invalid levels"
+        risk = abs(entry - stop)
+        reward = abs(tp1 - entry)
+        if risk == 0:
+            return False, "Zero risk — invalid stop"
+        rr = reward / risk
+        if rr < min_rr:
+            return False, f"RR {rr:.1f}:1 below minimum {min_rr}:1 (entry={entry:.2f} stop={stop:.2f} tp1={tp1:.2f})"
+        return True, f"RR {rr:.1f}:1"
 
     def get_size_modifier(self, vix: float) -> str:
         if vix >= VIX_HARD_BLOCK:

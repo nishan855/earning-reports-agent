@@ -23,6 +23,7 @@ class DataFeed:
         # WS disconnect tracking
         self._ws_disconnect_at: float = 0.0
         self._ws_disconnects: int = 0
+        self._debounce_sec: float = 5.0  # V3.3: skip quarantine if reconnect within 5s
         # Semaphore to cap concurrent yfinance calls
         self._yf_semaphore = asyncio.Semaphore(YF_MAX_CONCURRENT)
 
@@ -73,15 +74,22 @@ class DataFeed:
 
             try:
                 async with websockets.connect(url, ping_interval=30, ping_timeout=10) as ws:
-                    # On reconnect during market hours: fire callback with gap window
-                    if self._ws_disconnect_at > 0 and self._on_reconnect:
+                    # On reconnect: check gap duration for debounce
+                    if self._ws_disconnect_at > 0:
                         gap_start = self._ws_disconnect_at
                         gap_end = time.time()
+                        gap_sec = gap_end - gap_start
                         self._ws_disconnect_at = 0.0
-                        try:
-                            await self._on_reconnect(gap_start, gap_end)
-                        except Exception as e:
-                            print(f"[DataFeed] Reconnect handler error: {e}")
+                        if gap_sec < self._debounce_sec:
+                            # V3.3: Silent resume — brief blip, no quarantine needed
+                            print(f"[DataFeed] WS reconnected in {gap_sec:.1f}s — silent resume (no quarantine)")
+                        elif self._on_reconnect:
+                            # Real gap — run full resync protocol with quarantine
+                            print(f"[DataFeed] WS reconnected after {gap_sec:.1f}s — triggering resync")
+                            try:
+                                await self._on_reconnect(gap_start, gap_end)
+                            except Exception as e:
+                                print(f"[DataFeed] Reconnect handler error: {e}")
 
                     print(f"[DataFeed] WS connected — subscribing {len(ASSETS)} assets")
                     for asset in ASSETS:

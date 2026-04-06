@@ -61,6 +61,10 @@ class AssetCandleStore:
     def closed_1m(self) -> list[Candle]:
         return self.c1m[:-1] if len(self.c1m) > 1 else []
 
+    @closed_1m.setter
+    def closed_1m(self, value: list[Candle]):
+        self.c1m = value
+
     @property
     def closed_5m(self) -> list[Candle]:
         if self.c5m_live:
@@ -105,19 +109,26 @@ class AssetCandleStore:
             closed_candle = self.c1m[-2]
             if closed_candle.t != self._last_eval_ts:
                 self._last_eval_ts = closed_candle.t
-                try:
-                    asyncio.create_task(self._fire_callbacks(self._on_close_callbacks))
-                except RuntimeError:
-                    pass
-            # Check 5m/15m aggregation
-            self._check_5m_aggregation()
-            if self._pending_5m_fire:
-                try:
-                    asyncio.create_task(self._fire_callbacks(self._on_5m_callbacks))
-                except RuntimeError:
-                    pass
-                self._pending_5m_fire = False
-            self._check_15m_aggregation()
+                # Check 5m/15m aggregation before firing callbacks
+                self._check_5m_aggregation()
+                self._check_15m_aggregation()
+                if self._pending_5m_fire:
+                    # V4.0: 5m boundary — fire sequentially: 5m FIRST then 1m
+                    # 5m stores pending_sweep, 1m reads it for momentum check
+                    async def _fire_5m_then_1m(s=self):
+                        await s._fire_callbacks(s._on_5m_callbacks)
+                        await s._fire_callbacks(s._on_close_callbacks)
+                    try:
+                        asyncio.create_task(_fire_5m_then_1m())
+                    except RuntimeError:
+                        pass
+                    self._pending_5m_fire = False
+                else:
+                    # Normal 1m close (no 5m boundary)
+                    try:
+                        asyncio.create_task(self._fire_callbacks(self._on_close_callbacks))
+                    except RuntimeError:
+                        pass
         else:
             # Same minute — update live candle
             last.c = price

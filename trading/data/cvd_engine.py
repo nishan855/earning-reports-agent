@@ -90,12 +90,14 @@ class AssetCVDEngine:
         return self._cvd
 
     def process_bar(self, bar) -> float:
-        """Process a complete 1m bar directly (for backtesting).
-        Avoids the tick-by-tick path entirely."""
-        now = now_et()
-        today = now.strftime("%Y-%m-%d")
-        t_min = now.hour * 60 + now.minute
+        """V3.3: Process a closed 1m candle from candle store.
+        Uses the candle's own timestamp — no wall clock dependency."""
+        from datetime import datetime
+        bar_dt = datetime.fromtimestamp(bar.t / 1000, tz=ET)
+        today = bar_dt.strftime("%Y-%m-%d")
+        t_min = bar_dt.hour * 60 + bar_dt.minute
 
+        # Reset at 9:30 AM ET (new session)
         if today != self._session_date and t_min >= 570:
             self.reset()
             self._session_date = today
@@ -109,7 +111,7 @@ class AssetCVDEngine:
         else:
             delta = 0
 
-        minute_key = now.strftime("%H:%M")
+        minute_key = bar_dt.strftime("%H:%M")
         self._history.append(CVDPoint(
             time_et=minute_key,
             value=self._cvd,
@@ -187,7 +189,7 @@ class AssetCVDEngine:
 
     @property
     def value_1min_ago(self) -> float:
-        return self._history[-1].value if self._history else 0.0
+        return self._history[-2].value if len(self._history) >= 2 else 0.0
 
     @property
     def value_5min_ago(self) -> float:
